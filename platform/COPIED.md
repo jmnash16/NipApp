@@ -26,10 +26,11 @@ copied on 8 Oct 2026 from App at `82bebdb`. The paths below are relative to
 
 These files are NippApp's own and are not copies:
 
-- `hw/src/stbhwtun.c`: the tuner. For now it reports no lock; milestone 2
-  replaces it with the file tuner.
-- `hw/src/stbhwdmx.c`: the demux. For now it accepts no filters; milestone 2
-  adds section and PID filtering.
+- `hw/src/stbhwtun.c`: the file tuner. It reads the sources file and feeds TS
+  captures in real time, paced by PCR, or by TDT when there is no PCR.
+- `hw/src/stbhwdmx.c`: the demux. Section filtering only, using App's filter
+  ID scheme, with no audio, video or teletext PES handling.
+- `hw/inc/nipphw.h`: the interface between the tuner and the demux.
 - `hw/src/stubs.c`: AV, OSD, PVR, front panel, VBI and EBU functions, which a
   headless gateway does not need.
 

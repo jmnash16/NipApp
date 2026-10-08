@@ -39,20 +39,31 @@ callback DVBCore registers with `STB_TuneSetGSEDataCallback`. That runs the
 real GSE search (`APP_SI_MODE_GSE_NO_SI`, `ManageDVBNIPGSE`) with no changes
 to DVBCore.
 
-A sources file maps tuning parameters to files. Tuning a frequency that has no
-entry reports no lock, as an empty transponder would. The captures live in
+A sources file (`-s`, default `sources.conf`) maps carriers to files. Each
+line is `freq(MHz) pol symrate(ksym/s) kind file [loop|stop]`. Relative file
+names are relative to the sources file. The captures live in
 `DTVkit/Streams/DvbNIP`.
 
 ```
-# freq(MHz) pol  symrate  kind  file
-11355       H    27500    ts    ../Streams/DvbNIP/1067000.ts
-11471       V    27500    ts    ../Streams/DvbNIP/1097000.ts
-10900       H    30000    pcap  ../Streams/DvbNIP/2025-02-11_1min.pcap
+# freq(MHz) pol  symrate  kind  file                                  end
+11471       V    27500    ts    ../Streams/DvbNIP/1097000.ts          stop
+11013       H    27500    ts    ../Streams/DvbNIP/1087000.ts          stop
+10900       H    30000    pcap  ../Streams/DvbNIP/2025-02-11_1min.pcap stop
 ```
 
-Input is paced in real time: TS by PCR or TDT, PCAP by packet timestamps.
-When a file ends, its source either loops or stops, set per entry; stopping
-matches the test tool's `-w` hold.
+DVBCore tunes a universal LNB. The file tuner therefore works out the RF
+frequency from the IF plus the local oscillator that the 22 kHz tone selects
+(9750 or 10600 MHz), and the polarisation from the LNB voltage. It matches a
+source within 4 MHz and 2% of the symbol rate. DVBCore passes the LO in kHz
+through a 16-bit parameter (`STB_TuneSetLOFrequency`), so that value cannot
+be used. Tuning anything that matches no source reports no lock, as an empty
+transponder would.
+
+A TS source is fed in real time. It is paced by the first PCR PID seen. When
+the capture has no PCR (the Inverto captures), it is paced by the TDT/TOT and
+the average bitrate between them, as the test tool's `-r` does. At the end of
+the file the source loops or stops; a stopped source leaves the tuner locked
+with no data.
 
 Every stream carries NIP Actual Carrier Information (TSI 1 on the announcement
 address, LCT extension 68, every 250 ms; 8.7). NippApp reads it to confirm
@@ -116,16 +127,19 @@ network need real code; the rest are stubs, added as the linker asks for them.
 
 1. `APP_InitialiseDVB(EventHandler, DVB_INIT_NO_TELETEXT_OR_SUBTITLES)`.
 2. On first run (empty database), create a satellite and LNB record.
-3. If the database has no NIP services, or `--scan` is given:
+3. Set DVBCore's country (`-c`, default `gbr`) if it is not set already. The
+   country decides LCN allocation; App asks for it in its first-time setup.
+   Without one, no satellite LCNs are allocated.
+4. If the database has no services, or `--scan` is given:
    `ASI_SetSearchServiceType(SEARCH_SERVICE_TYPE_DVBNIP | ..._DVBNIP_GSE)`, then
    `ACTL_StartManualSearch(SIGNAL_QPSK, params, ...)` for each sources entry,
    one at a time, with `is_gse` set for PCAP entries. The event handler
    advances to the next entry when each search completes. The sources file
    stands in for the preset bootstrap stream list of Annex C.4.1.
-4. Services found by DVBCore go into the database through `DVBNIP_AddServices`
+5. Services found by DVBCore go into the database through `DVBNIP_AddServices`
    (stable IDs, DVB-I names and LCNs); a metadata change later re-runs it via
    `NIPTASK_UPDATESERVICES`.
-5. Start the HTTP server (and, in Phase B, the mDNS announcement).
+6. Start the HTTP server (and, in Phase B, the mDNS announcement).
 
 ## Serving
 
@@ -225,6 +239,17 @@ our captures use FLUTE with Content-Encoding null.
 - The PCAP has no tuning information. Its tuning parameters come from the
   sources file; the NIF in the SES capture names network 1, carrier 1045, and
   its NACI confirms which carrier it is.
-- A TS search through the DVBCore search engine expects SI (PAT/PMT/SDT/NIT).
-  `1097000.ts` has PAT, SDT, PMT and TDT/TOT but no NIT, so milestone 2 will
-  show whether the search accepts that.
+- The Eutelsat capture (`1087000.ts`) gets fallback names and LCNs: its DVB-I
+  list has not arrived when the NIP scan finishes, and the search then moves
+  on, so the later update never happens. App would stay tuned; NippApp needs
+  to wait for the list or come back for it.
+- The MPE carrier service (DVB-NIP-VV) is itself listed as a channel, at LCN
+  1000. It should probably be hidden.
+
+## Milestone 2 findings
+
+- A missing NIT is not a problem: the search times out on the NIT and goes on.
+- The Inverto captures' SDT has no data_broadcast_descriptor, so DVBCore never
+  started the NIP scan. DVBCore's search now also recognises the MPE stream by
+  its PMT stream type 0x0D, as DVB-NIP clause 7.3.3 requires (`ap_si.c`,
+  `FindPmtMpePid`). The PMT is read before `ProcessPmtTable`, which frees it.

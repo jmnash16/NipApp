@@ -18,11 +18,13 @@
 /* compiler library header files */
 #include <errno.h>
 #include <getopt.h>
+#include <limits.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 /* STB header files */
@@ -30,11 +32,14 @@
 #include "dbgfuncs.h"
 #include "app.h"
 #include "ap_dbacc.h"
+#include "nipphw.h"
 
 #include "nippapp.h"
 
 /*---constant definitions for this file---------------------------------------*/
 #define NIPPAPP_VERSION    "0.1.0"
+#define DEFAULT_SOURCES    "sources.conf"
+#define DEFAULT_COUNTRY    "gbr"
 
 /*---local (static) variable declarations for this file-----------------------*/
 /* Posted by the signal handler; sem_post is async-signal-safe */
@@ -48,23 +53,64 @@ static BOOLEAN InstallSignalHandlers(void);
 
 /*---global function definitions---------------------------------------------*/
 
+BOOLEAN NIPPAPP_StopRequested(U32BIT wait_ms)
+{
+   struct timespec until;
+
+   if ((stop_signal == 0) && (wait_ms != 0))
+   {
+      clock_gettime(CLOCK_REALTIME, &until);
+      until.tv_sec += wait_ms / 1000;
+      until.tv_nsec += (long)(wait_ms % 1000) * 1000000;
+      if (until.tv_nsec >= 1000000000)
+      {
+         until.tv_sec++;
+         until.tv_nsec -= 1000000000;
+      }
+      while ((sem_timedwait(&stop_sem, &until) != 0) && (errno == EINTR) && (stop_signal == 0))
+      {
+      }
+   }
+
+   return (stop_signal != 0);
+}
+
 int main(int argc, char *argv[])
 {
    static const struct option long_opts[] = {
       {"dir", required_argument, NULL, 'd'},
+      {"sources", required_argument, NULL, 's'},
+      {"scan", no_argument, NULL, 'S'},
+      {"country", required_argument, NULL, 'c'},
       {"help", no_argument, NULL, 'h'},
       {"version", no_argument, NULL, 'V'},
       {NULL, 0, NULL, 0}
    };
    const char *work_dir = NULL;
+   const char *sources_file = DEFAULT_SOURCES;
+   char sources_path[PATH_MAX];
+   const char *country = DEFAULT_COUNTRY;
+   BOOLEAN force_scan = FALSE;
    int opt;
 
-   while ((opt = getopt_long(argc, argv, "d:hV", long_opts, NULL)) != -1)
+   /* Line-buffered output, so that progress shows when the output goes to a file */
+   setvbuf(stdout, NULL, _IOLBF, 0);
+
+   while ((opt = getopt_long(argc, argv, "d:s:Sc:hV", long_opts, NULL)) != -1)
    {
       switch (opt)
       {
          case 'd':
             work_dir = optarg;
+            break;
+         case 's':
+            sources_file = optarg;
+            break;
+         case 'S':
+            force_scan = TRUE;
+            break;
+         case 'c':
+            country = optarg;
             break;
          case 'V':
             printf("NippApp %s\n", NIPPAPP_VERSION);
@@ -76,6 +122,13 @@ int main(int argc, char *argv[])
             Usage(argv[0]);
             return 1;
       }
+   }
+
+   /* The sources file is named relative to where NippApp was started, before -d */
+   if (realpath(sources_file, sources_path) == NULL)
+   {
+      fprintf(stderr, "NippApp: sources file '%s': %s\n", sources_file, strerror(errno));
+      return 1;
    }
 
    /* DVBCore keeps its database (./dtvkit.sqlite3) and NVM file in the working directory */
@@ -93,6 +146,13 @@ int main(int argc, char *argv[])
 
    printf("NippApp %s starting\n", NIPPAPP_VERSION);
 
+   /* The tuner reads the sources when DVBCore initialises it */
+   if (!TUN_LoadSources(sources_path))
+   {
+      return 1;
+   }
+   printf("NippApp: %u sources in %s\n", TUN_GetNumSources(), sources_path);
+
    if (!APP_InitialiseDVB(NIPPAPP_EventHandler, DVB_INIT_NO_TELETEXT_OR_SUBTITLES))
    {
       fprintf(stderr, "NippApp: DVBCore initialisation failed\n");
@@ -102,8 +162,21 @@ int main(int argc, char *argv[])
    printf("NippApp: DVBCore initialised, %u services in the database\n",
       (unsigned)ADB_GetNumServicesInList(ADB_SERVICE_LIST_ALL, FALSE));
 
-   /* Everything runs on DVBCore's tasks; the main thread waits for a stop request */
-   while ((sem_wait(&stop_sem) != 0) && (errno == EINTR))
+   if (!NIPPAPP_SetupCountry(country))
+   {
+      return 1;
+   }
+
+   if (force_scan || (ADB_GetNumServicesInList(ADB_SERVICE_LIST_ALL, FALSE) == 0))
+   {
+      if (NIPPAPP_Scan())
+      {
+         NIPPAPP_PrintServices();
+      }
+   }
+
+   /* Everything else runs on DVBCore's tasks; the main thread waits for a stop request */
+   while (!NIPPAPP_StopRequested(1000))
    {
    }
 
@@ -121,9 +194,12 @@ int main(int argc, char *argv[])
 static void Usage(const char *name)
 {
    printf("Usage: %s [options]\n"
-      "  -d, --dir <path>   working directory for the database and NVM files\n"
-      "  -h, --help         show this help\n"
-      "  -V, --version      show the version\n", name);
+      "  -d, --dir <path>       working directory for the database and NVM files\n"
+      "  -s, --sources <file>   sources file mapping carriers to captures (default %s)\n"
+      "  -S, --scan             search every source, even if the database has services\n"
+      "  -c, --country <code>   ISO 3166 country, which decides LCN allocation (default %s)\n"
+      "  -h, --help             show this help\n"
+      "  -V, --version          show the version\n", name, DEFAULT_SOURCES, DEFAULT_COUNTRY);
 }
 
 static void SignalHandler(int sig)

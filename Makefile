@@ -17,6 +17,7 @@ TARGET    = $(BUILD_DIR)/nippapp
 CC ?= cc
 
 SRCS = src/main.c \
+       src/search.c \
        src/events.c \
        platform/os/stbos_event.c \
        platform/os/stbos_mutex.c \

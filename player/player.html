@@ -1,0 +1,327 @@
+<!doctype html>
+<!--
+  Copyright © 2026 The DTVKit Open Software Foundation Ltd (www.dtvkit.org)
+
+  This file is part of a DTVKit Software Component
+  You are permitted to copy, modify or distribute this file subject to the terms
+  of the DTVKit 1.0 Licence which can be found in licence.txt or at www.dtvkit.org
+
+  NippApp web player: a DVB-I client. It learns about services only through the gateway's DVB-I
+  endpoints (the service list entry points at /dvbi/slep.xml and the service lists they name),
+  using dvbi-client-js, and plays them with dash.js or hls.js. The files in vendor/ are made by
+  tools/build-player.sh.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NippApp player</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5b6475; --line: #dde1e8;
+    --accent: #2156c9; --ok: #237a3b; --warn: #a15c00; --err: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --panel: #1d2128; --text: #e6e9ef; --muted: #9aa3b2; --line: #2e343e;
+      --accent: #7aa2ff; --ok: #6fcf86; --warn: #f0b35a; --err: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: minmax(260px, 360px) 1fr; gap: 16px; padding: 16px; }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; min-width: 0; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  select { width: 100%; padding: 6px; font: inherit; background: var(--panel); color: var(--text);
+           border: 1px solid var(--line); border-radius: 6px; }
+  ul { list-style: none; margin: 12px 0 0; padding: 0; }
+  li { display: flex; align-items: center; gap: 8px; padding: 8px 4px; border-top: 1px solid var(--line); }
+  li.playing { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .logo { width: 40px; height: 24px; object-fit: contain; }
+  .lcn { width: 3.2em; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button { font: inherit; font-size: 13px; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+           border: 1px solid var(--accent); background: transparent; color: var(--accent); }
+  button:hover { background: var(--accent); color: var(--panel); }
+  video { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; display: block; }
+  .controls { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+  .now { flex: 1; color: var(--muted); font-size: 13px; }
+  #log { margin: 8px 0 0; padding: 8px; height: 180px; overflow: auto; font: 12px/1.4 ui-monospace, monospace;
+         background: var(--bg); border-radius: 6px; white-space: pre-wrap; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+</style>
+<script src="vendor/dashjs/dash.all.min.js"></script>
+<script src="vendor/hlsjs/hls.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>NippApp player</h1>
+  <p>Services from the gateway's DVB-I service lists, received over DVB-NIP</p>
+</header>
+<main>
+  <section>
+    <label for="lists">Service list</label>
+    <select id="lists"></select>
+    <ul id="services"></ul>
+  </section>
+  <section>
+    <video id="video" controls muted playsinline></video>
+    <div class="controls">
+      <span class="now" id="now">Choose a service</span>
+      <button id="stop" type="button">Stop</button>
+    </div>
+    <div id="log" aria-live="polite"></div>
+  </section>
+</main>
+
+<script type="module">
+import { createDvbiClient } from './vendor/dvbi-client-js/index.js';
+
+const LIVE_DELAY = 4;      // seconds behind the live edge: segments arrive once complete
+const JOIN_MARGIN = 1;     // extra seconds after joining, before the first segment is needed
+const ENTRY_POINTS = new URL('/dvbi/slep.xml', location.origin).href;
+
+const $ = (id) => document.getElementById(id);
+const video = $('video');
+let client = null;
+let dashPlayer = null;
+let hlsPlayer = null;
+let playToken = 0;
+let offerings = [];
+
+function log(text, level) {
+  const line = document.createElement('div');
+  line.textContent = new Date().toLocaleTimeString() + '  ' + text;
+  if (level) line.className = level;
+  $('log').appendChild(line);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+/* How an instance is delivered: { type: 'dash' | 'hls' | ..., url } */
+function delivery(instance) {
+  const parameters = instance.deliveryParameters || instance;
+  if (parameters.type === 'dash' && parameters.dash?.mpdUrl) return { type: 'dash', url: parameters.dash.mpdUrl };
+  if (parameters.type === 'hls' && parameters.other?.url) return { type: 'hls', url: parameters.other.url };
+  return null;
+}
+
+function textOf(localized) {
+  if (Array.isArray(localized)) return localized.length ? (localized[0].text || '') : '';
+  return localized || '';
+}
+
+/* ---- DVB-I: entry points, service lists, services ---- */
+
+async function start() {
+  client = createDvbiClient({});
+  client.connect();
+  await client.call('dvbi.manager.initialize');
+
+  log('Reading the service list entry points at ' + ENTRY_POINTS);
+  const discovered = await client.call('dvbi.services.discoverServiceLists', { registryUrl: ENTRY_POINTS });
+  offerings = [];
+  for (const entry of discovered.providers || []) {
+    for (const offering of entry.offerings || []) {
+      const url = (offering.selectedServiceListUrls || offering.serviceListUrls || [])[0];
+      if (url) offerings.push({ name: textOf(offering.name) || url, provider: textOf(entry.provider.name), url });
+    }
+  }
+  if (!offerings.length) {
+    log('The entry points list no service lists', 'err');
+    return;
+  }
+
+  const select = $('lists');
+  select.innerHTML = '';
+  offerings.forEach((offering, index) => {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = offering.provider ? offering.provider + ': ' + offering.name : offering.name;
+    select.appendChild(option);
+  });
+  select.onchange = () => loadList(offerings[Number(select.value)]);
+  await loadList(offerings[0]);
+}
+
+async function loadList(offering) {
+  const list = $('services');
+  list.innerHTML = '';
+  log('Loading ' + offering.name + ' (' + offering.url + ')');
+  try {
+    await client.call('dvbi.services.unloadServiceList').catch(() => {});
+    await client.call('dvbi.services.loadServiceList', { url: offering.url });
+  } catch (error) {
+    log('Cannot load the service list: ' + (error.message || error), 'err');
+    return;
+  }
+
+  const services = (await client.call('dvbi.services.getAll')) || [];
+  services.sort((a, b) => (a.lcn || 1e9) - (b.lcn || 1e9));
+  let shown = 0;
+  for (const service of services) {
+    const playable = (service.instances || []).map(delivery).filter(Boolean);
+    const item = document.createElement('li');
+    item.dataset.id = service.uniqueId;
+    const lcn = document.createElement('span');
+    lcn.className = 'lcn';
+    lcn.textContent = service.lcn || '';
+    const logo = document.createElement('img');
+    logo.className = 'logo';
+    logo.alt = '';
+    const logoUrl = (service.logos || []).find((l) => l.materialType === 'service_logo')?.url;
+    if (logoUrl) { logo.src = logoUrl; logo.onerror = () => { logo.style.visibility = 'hidden'; }; }
+    else logo.style.visibility = 'hidden';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = service.name || service.uniqueId;
+    name.title = service.uniqueId;
+    item.append(lcn, logo, name);
+    for (const instance of playable) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = instance.type === 'dash' ? 'DASH' : 'HLS';
+      button.onclick = () => play(service, instance);
+      item.appendChild(button);
+    }
+    if (!playable.length) {
+      const none = document.createElement('span');
+      none.className = 'now';
+      none.textContent = 'not playable here';
+      item.appendChild(none);
+    }
+    list.appendChild(item);
+    shown++;
+  }
+  log(shown + ' services', 'ok');
+}
+
+/* ---- Playback ---- */
+
+function stopPlayback() {
+  playToken++;
+  if (dashPlayer) { dashPlayer.reset(); dashPlayer = null; }
+  if (hlsPlayer) { hlsPlayer.destroy(); hlsPlayer = null; }
+  video.removeAttribute('src');
+  video.load();
+  for (const item of $('services').children) item.classList.remove('playing');
+}
+
+/* The longest segment, in seconds, from a DASH MPD or an HLS playlist */
+function segmentDuration(manifest, isHls) {
+  if (isHls) {
+    const target = /#EXT-X-TARGETDURATION:(\d+)/.exec(manifest);
+    return target ? Number(target[1]) : 2;
+  }
+  let longest = 1;
+  const doc = new DOMParser().parseFromString(manifest, 'application/xml');
+  for (const template of doc.getElementsByTagName('SegmentTemplate')) {
+    const duration = Number(template.getAttribute('duration'));
+    const timescale = Number(template.getAttribute('timescale') || 1);
+    if (duration > 0 && timescale > 0) longest = Math.max(longest, duration / timescale);
+  }
+  return longest;
+}
+
+async function play(service, instance) {
+  stopPlayback();
+  const token = playToken;
+  const isHls = instance.type === 'hls';
+  const url = instance.url;
+  for (const item of $('services').children) item.classList.toggle('playing', item.dataset.id === service.uniqueId);
+  $('now').textContent = (service.name || service.uniqueId) + (isHls ? ' (HLS)' : ' (DASH)');
+
+  /* The first request tunes the carrier; the gateway answers once the manifest has arrived. Only
+   * segments that start after joining are received, so the player starts once enough of them have. */
+  log('Requesting ' + url);
+  let manifest;
+  try {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    manifest = await response.text();
+  } catch (error) {
+    log('The manifest is not available: ' + error.message, 'err');
+    return;
+  }
+  const wait = LIVE_DELAY + segmentDuration(manifest, isHls) + JOIN_MARGIN;
+  log('Joined; waiting ' + wait.toFixed(1) + ' s for the first segments');
+  await new Promise((resolve) => setTimeout(resolve, wait * 1000));
+  if (token !== playToken) return;
+
+  if (isHls) startHls(url); else startDash(url);
+}
+
+function startDash(url) {
+  if (typeof dashjs === 'undefined') { log('dash.js is not loaded; run tools/build-player.sh', 'err'); return; }
+  dashPlayer = dashjs.MediaPlayer().create();
+  dashPlayer.updateSettings({
+    debug: { logLevel: dashjs.Debug.LOG_LEVEL_WARNING },
+    streaming: {
+      delay: { liveDelay: LIVE_DELAY },
+      // keep retrying a late segment rather than giving up on it
+      retryAttempts: { MediaSegment: 10, InitializationSegment: 10 },
+      retryIntervals: { MediaSegment: 500, InitializationSegment: 500 },
+      utcSynchronization: {
+        enabled: true,
+        useManifestDateHeaderTimeSource: false,
+        // the gateway points the MPD's UTCTiming here too: the broadcast time
+        defaultTimingSource: { scheme: 'urn:mpeg:dash:utc:http-xsdate:2014', value: location.origin + '/time' }
+      }
+    }
+  });
+  const E = dashjs.MediaPlayer.events;
+  dashPlayer.on(E.STREAM_INITIALIZED, () => log('Stream initialised', 'ok'));
+  dashPlayer.on(E.PLAYBACK_PLAYING, () => log('Playing', 'ok'));
+  dashPlayer.on(E.PLAYBACK_WAITING, () => log('Buffering', 'warn'));
+  dashPlayer.on(E.ERROR, (event) => {
+    const error = event.error || {};
+    log('Error ' + (error.code || '') + ': ' + (error.message || JSON.stringify(error)), 'err');
+  });
+  log('Playing ' + url + ' with dash.js');
+  dashPlayer.initialize(video, url, true);
+}
+
+function startHls(url) {
+  if (typeof Hls === 'undefined') { log('hls.js is not loaded; run tools/build-player.sh', 'err'); return; }
+  if (!Hls.isSupported()) {
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      log('Playing ' + url + ' with the browser\'s own HLS player');
+      video.src = url;
+      video.play().catch(() => {});
+    } else {
+      log('This browser cannot play HLS', 'err');
+    }
+    return;
+  }
+  hlsPlayer = new Hls({
+    liveSyncDuration: LIVE_DELAY,
+    liveMaxLatencyDuration: LIVE_DELAY * 3,
+    // keep retrying a late segment or playlist rather than giving up on it
+    fragLoadingMaxRetry: 10, fragLoadingRetryDelay: 500,
+    levelLoadingMaxRetry: 10, levelLoadingRetryDelay: 500,
+    manifestLoadingMaxRetry: 10, manifestLoadingRetryDelay: 500
+  });
+  const player = hlsPlayer;
+  hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => { log('Playlist loaded', 'ok'); video.play().catch(() => {}); });
+  hlsPlayer.on(Hls.Events.FRAG_BUFFERED, () => { if (video.paused) video.play().catch(() => {}); });
+  hlsPlayer.on(Hls.Events.ERROR, (event, data) => {
+    log('Error ' + data.type + ': ' + data.details, data.fatal ? 'err' : 'warn');
+    if (!data.fatal || hlsPlayer !== player) return;
+    if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hlsPlayer.startLoad();
+    else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hlsPlayer.recoverMediaError();
+  });
+  log('Playing ' + url + ' with hls.js');
+  hlsPlayer.loadSource(url);
+  hlsPlayer.attachMedia(video);
+}
+
+video.addEventListener('playing', () => log('Video playing', 'ok'));
+$('stop').onclick = () => { stopPlayback(); $('now').textContent = 'Stopped'; log('Stopped'); };
+
+start().catch((error) => log('Error: ' + (error.message || error), 'err'));
+</script>
+</body>
+</html>

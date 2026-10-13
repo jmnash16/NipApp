@@ -23,9 +23,10 @@
  *            tuned), the copy kept by the registry is served.
  *          - MPDs get a UTCTiming pointing at /time and a short update period (clause 9.1.2);
  *            AAC init segments get the plain AudioSpecificConfig some browsers need.
- *          - /time gives the broadcast time (clause 8.6.3).
+ *          - /time gives the NIP wall clock (clauses 8.6.1, 8.6.3), or the TDT/capture time.
  *          - /dvbi/slep.xml gives the DVB-I service list entry points, which the broadcast
  *            identifies by URN only (clause 8.2.5.1).
+ *          - /player/ serves the web player's files.
  *
  *          The MPD rewrite and the AAC fix are taken from the test tool in DVBCore/dvbnip/test.
  * @file    httpd.c
@@ -65,6 +66,10 @@
 
 /* A file that hasn't arrived is waited for, in steps, before answering 404 */
 #define HOLD_MS               8000
+
+#define PLAYER_PREFIX         "/player/"
+#define MAX_PLAYER_FILE       (8 * 1024 * 1024)
+#define MAX_PATH_LEN          1024
 #define HOLD_STEP_MS          200
 
 /* The broadcast gives the DVB-I service list entry points a URN, not a URL (clause 8.2.5.1), so
@@ -93,18 +98,35 @@ typedef struct
 static struct mg_context *ctx = NULL;
 static char listen_port[16];
 static char default_host[MAX_HOST_LEN];
+static char player_root[MAX_PATH_LEN];
+
+/* Media types of the player's files, by extension */
+static const char *player_types[][2] = {
+   {".html", "text/html; charset=utf-8"},
+   {".js", "text/javascript"},
+   {".mjs", "text/javascript"},
+   {".css", "text/css"},
+   {".map", "application/json"},
+   {".json", "application/json"},
+   {".svg", "image/svg+xml"},
+   {".png", "image/png"},
+   {".md", "text/plain; charset=utf-8"},
+   {".txt", "text/plain; charset=utf-8"},
+   {NULL, NULL}
+};
 
 /*---local function prototypes for this file----------------------------------*/
 static int BeginRequestHandler(struct mg_connection *conn);
 
 /*---global function definitions---------------------------------------------*/
 
-BOOLEAN HTTPD_Start(const char *port)
+BOOLEAN HTTPD_Start(const char *port, const char *player_dir)
 {
    struct mg_callbacks callbacks;
    const char *options[] = {"listening_ports", NULL, "num_threads", "32", NULL};
 
    snprintf(listen_port, sizeof(listen_port), "%s", port);
+   snprintf(player_root, sizeof(player_root), "%s", (player_dir != NULL) ? player_dir : "");
    snprintf(default_host, sizeof(default_host), "localhost:%s", port);
    options[1] = listen_port;
 
@@ -118,7 +140,7 @@ BOOLEAN HTTPD_Start(const char *port)
       return FALSE;
    }
 
-   printf("NippApp: HTTP server on port %s\n", port);
+   printf("NippApp: HTTP server on port %s, player at http://localhost:%s/player/\n", port, port);
    return TRUE;
 }
 
@@ -261,7 +283,8 @@ static void SendIndex(struct mg_connection *conn)
    S_STRING_BUFFER buf = {NULL, 0, 0};
 
    AppendString(&buf, "<!doctype html><html><head><meta charset=\"utf-8\"><title>NippApp</title></head>"
-      "<body><h1>NippApp</h1><p>DVB-I service list entry points: <a href=\"" SLEP_PATH "\">" SLEP_PATH
+      "<body><h1>NippApp</h1><p><a href=\"" PLAYER_PREFIX "\">Open the player</a></p>"
+      "<p>DVB-I service list entry points: <a href=\"" SLEP_PATH "\">" SLEP_PATH
       "</a></p><p>Signalling received from the broadcast "
       "(DVB-I entry points and service lists, NIP signalling):</p><ul>\n");
    DVBNIP_EnumFiles(&buf, IndexFileCallback);
@@ -287,8 +310,16 @@ static void SendTime(struct mg_connection *conn)
    struct tm tm;
    char text[64];
    int len;
+   U32BIT wall_seconds;
+   U16BIT wall_ms;
 
-   if (!TUN_GetBroadcastTime(&utc))
+   /* The NIP wall clock (EXT_TIME, clause 8.6.1) when the broadcast gives it; otherwise the TDT
+    * or capture time the tuner keeps */
+   if (DVBNIP_GetWallClock(&wall_seconds, &wall_ms))
+   {
+      utc = wall_seconds + (wall_ms / 1000.0);
+   }
+   else if (!TUN_GetBroadcastTime(&utc))
    {
       /* No broadcast time yet: let the player retry rather than use the wrong clock */
       SendResponse(conn, 503, "Service Unavailable", "text/plain", "Cache-Control: no-store\r\n", NULL, 0);
@@ -639,7 +670,10 @@ static BOOLEAN WorthWaitingFor(const char *path)
    return FALSE;
 }
 
-static void SendFile(struct mg_connection *conn, const char *path)
+/* prefer_registry: serve the registry's copy before the NIP library's. For the entry points,
+ * which the registry keeps whatever location they came with, the NIP library may hold an older
+ * network's under the URN. */
+static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefer_registry)
 {
    U8BIT *data;
    U8BIT *filetype;
@@ -651,9 +685,9 @@ static void SendFile(struct mg_connection *conn, const char *path)
    /* The NIP library's copy is the latest. Without one, a DVB-I document is served from the
     * registry; anything else under a service's directory starts the service, so it may arrive
     * shortly and is waited for before answering 404. */
-   from_registry = FALSE;
+   from_registry = prefer_registry && REG_Load(path, &data, &len, (char **)&filetype);
    waited = 0;
-   while (!DVBNIP_CopyFile((const U8BIT *)path, &data, &len, &filetype))
+   while (!from_registry && !DVBNIP_CopyFile((const U8BIT *)path, &data, &len, &filetype))
    {
       if (REG_Load(path, &data, &len, (char **)&filetype))
       {
@@ -715,6 +749,70 @@ static void SendFile(struct mg_connection *conn, const char *path)
    }
 }
 
+/************************************************************************
+ * The web player's files, from the player directory
+ */
+
+static void SendPlayerFile(struct mg_connection *conn, const char *uri)
+{
+   const char *name = uri + strlen(PLAYER_PREFIX);
+   const char *ext;
+   const char *type;
+   char filename[MAX_PATH_LEN];
+   FILE *f;
+   long size;
+   char *data;
+   int i;
+
+   if (*name == '\0')
+   {
+      name = "player.html";
+   }
+
+   /* Only plain names below the player directory */
+   if ((player_root[0] == '\0') || (strstr(name, "..") != NULL) || (strstr(name, "//") != NULL) ||
+       (name[0] == '/') || ((size_t)snprintf(filename, sizeof(filename), "%s/%s", player_root, name) >= sizeof(filename)))
+   {
+      SendNotFound(conn);
+      return;
+   }
+
+   type = NULL;
+   ext = strrchr(name, '.');
+   for (i = 0; (ext != NULL) && (player_types[i][0] != NULL); i++)
+   {
+      if (strcasecmp(ext, player_types[i][0]) == 0)
+      {
+         type = player_types[i][1];
+      }
+   }
+   if ((type == NULL) && (strchr(name, '.') == NULL))
+   {
+      /* LICENSE, VERSION */
+      type = "text/plain; charset=utf-8";
+   }
+
+   f = (type != NULL) ? fopen(filename, "rb") : NULL;
+   if (f == NULL)
+   {
+      SendNotFound(conn);
+      return;
+   }
+   data = NULL;
+   if ((fseek(f, 0, SEEK_END) == 0) && ((size = ftell(f)) >= 0) && (size <= MAX_PLAYER_FILE) &&
+       (fseek(f, 0, SEEK_SET) == 0) && ((data = (char *)malloc(size + 1)) != NULL) &&
+       (fread(data, 1, size, f) == (size_t)size))
+   {
+      SendResponse(conn, 200, "OK", type, "Cache-Control: no-cache\r\n", data, (U32BIT)size);
+   }
+   else
+   {
+      SendNotFound(conn);
+   }
+   free(data);
+   fclose(f);
+}
+
 static int BeginRequestHandler(struct mg_connection *conn)
 {
    const struct mg_request_info *request_info = mg_get_request_info(conn);
@@ -734,11 +832,19 @@ static int BeginRequestHandler(struct mg_connection *conn)
    }
    else if (strcmp(uri, SLEP_PATH) == 0)
    {
-      SendFile(conn, SLEP_LOCATION);
+      SendFile(conn, SLEP_LOCATION, TRUE);
+   }
+   else if (strcmp(uri, "/player") == 0)
+   {
+      SendResponse(conn, 302, "Found", "text/plain", "Location: " PLAYER_PREFIX "\r\n", NULL, 0);
+   }
+   else if (strncmp(uri, PLAYER_PREFIX, strlen(PLAYER_PREFIX)) == 0)
+   {
+      SendPlayerFile(conn, uri);
    }
    else
    {
-      SendFile(conn, uri);
+      SendFile(conn, uri, FALSE);
    }
 
    /* Non-zero: the request has been answered */

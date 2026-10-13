@@ -17,8 +17,12 @@
  *
  *          Documents are kept under registry/ in the working directory, at their broadcast path
  *          (http://dvb.gw/ses.com/dvbi/list.xml is registry/ses.com/dvbi/list.xml); a document
- *          identified by URN, such as the entry points, is kept under registry/urn/. Its media
+ *          identified by URN is kept under registry/urn/, and a bare name (dvb_i_sl_ep.xml, which
+ *          some headends send instead of a dvb.gw URL) is taken as a path from the root. Its media
  *          type is kept beside it, in a file with TYPE_SUFFIX added to the name.
+ *
+ *          The entry points are also kept under SLEP_LOCATION, whatever location they were sent
+ *          with, so that the gateway always has one to serve.
  * @file    registry.c
  */
 
@@ -49,6 +53,10 @@
 #define MAX_TYPE_LEN          256
 #define MAX_DOCUMENT_SIZE     (4 * 1024 * 1024)
 
+/* The location the entry points are kept under: the one the spec gives them (clause 8.2.5.1) */
+#define SLEP_LOCATION         "urn:dvb:metadata:nativeip:dvb-i-slep"
+#define SLEP_TYPE             "application/xml+dvb-i-slep"
+
 /*---local (static) variable declarations for this file-----------------------*/
 
 /* Media types of the documents kept, compared without any parameters */
@@ -62,6 +70,8 @@ static const char *dvbi_types[] = {
 
 /*---local function prototypes for this file----------------------------------*/
 static void FileStored(void *user_data, S_FLUTE_FILE *file);
+static void KeepDocument(const char *location, const char *filetype, U8BIT *data, U32BIT len,
+   U32BIT version);
 static BOOLEAN RegistryFile(const char *location, char *filename, size_t size);
 static BOOLEAN MakeParentDirs(char *filename);
 static BOOLEAN SameContent(const char *filename, const U8BIT *data, U32BIT len);
@@ -144,17 +154,15 @@ BOOLEAN REG_Load(const char *location, U8BIT **data, U32BIT *len, char **filetyp
  * document is copied to the registry when its content has changed. */
 static void FileStored(void *user_data, S_FLUTE_FILE *file)
 {
-   char filename[MAX_PATH_LEN];
-   char type_name[MAX_PATH_LEN + sizeof(TYPE_SUFFIX)];
    S_FLUTE_FILE_READ reader;
    U8BIT *data;
    U32BIT len;
+   size_t slep_len = strlen(SLEP_TYPE);
 
    USE_UNWANTED_PARAM(user_data);
 
    if ((file->filename == NULL) || !REG_IsDvbiType((const char *)file->filetype) ||
-       (file->length > MAX_DOCUMENT_SIZE) ||
-       !RegistryFile((const char *)file->filename, filename, sizeof(filename)))
+       (file->length > MAX_DOCUMENT_SIZE))
    {
       return;
    }
@@ -167,22 +175,43 @@ static void FileStored(void *user_data, S_FLUTE_FILE *file)
    FLUTE_FileOpen(&reader, file);
    len = FLUTE_FileRead(&reader, data, file->length);
 
-   if (!SameContent(filename, data, len) && MakeParentDirs(filename))
+   KeepDocument((const char *)file->filename, (const char *)file->filetype, data, len, file->version);
+
+   /* The entry points, whatever location they came with, are also the gateway's entry points */
+   if ((strncasecmp((const char *)file->filetype, SLEP_TYPE, slep_len) == 0) &&
+       ((file->filetype[slep_len] == '\0') || (file->filetype[slep_len] == ';')) &&
+       (strcmp((const char *)file->filename, SLEP_LOCATION) != 0))
    {
-      snprintf(type_name, sizeof(type_name), "%s%s", filename, TYPE_SUFFIX);
-      if (WriteFileAtomically(type_name, file->filetype, strlen((const char *)file->filetype)) &&
-          WriteFileAtomically(filename, data, len))
-      {
-         printf("NippApp: registry: kept %s (%s, version %u)\n", (const char *)file->filename,
-            (const char *)file->filetype, (unsigned)file->version);
-      }
+      KeepDocument(SLEP_LOCATION, (const char *)file->filetype, data, len, file->version);
    }
 
    free(data);
 }
 
+/* Writes a document to the registry if its content has changed */
+static void KeepDocument(const char *location, const char *filetype, U8BIT *data, U32BIT len,
+   U32BIT version)
+{
+   char filename[MAX_PATH_LEN];
+   char type_name[MAX_PATH_LEN + sizeof(TYPE_SUFFIX)];
+
+   if (!RegistryFile(location, filename, sizeof(filename)) || SameContent(filename, data, len) ||
+       !MakeParentDirs(filename))
+   {
+      return;
+   }
+
+   snprintf(type_name, sizeof(type_name), "%s%s", filename, TYPE_SUFFIX);
+   if (WriteFileAtomically(type_name, filetype, strlen(filetype)) &&
+       WriteFileAtomically(filename, data, len))
+   {
+      printf("NippApp: registry: kept %s (%s, version %u)\n", location, filetype, (unsigned)version);
+   }
+}
+
 /* The registry file for a document's location: a URL (scheme and host removed), a broadcast path
- * starting with '/', or a URN. Returns FALSE for a location that can't be stored safely. */
+ * starting with '/', a URN, or a bare name taken as a path from the root. Returns FALSE for a
+ * location that can't be stored safely. */
 static BOOLEAN RegistryFile(const char *location, char *filename, size_t size)
 {
    const char *path;
@@ -203,6 +232,10 @@ static BOOLEAN RegistryFile(const char *location, char *filename, size_t size)
    else if (location[0] == '/')
    {
       len = snprintf(filename, size, "%s%s", REGISTRY_DIR, location);
+   }
+   else if (strncasecmp(location, "urn:", 4) != 0)
+   {
+      len = snprintf(filename, size, "%s/%s", REGISTRY_DIR, location);
    }
    else
    {

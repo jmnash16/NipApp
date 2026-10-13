@@ -57,6 +57,7 @@ static volatile sig_atomic_t stop_signal = 0;
 static void Usage(const char *name);
 static void SignalHandler(int sig);
 static BOOLEAN InstallSignalHandlers(void);
+static BOOLEAN FindPlayerDir(const char *given, const char *argv0, char *dir, size_t size);
 
 /*---global function definitions---------------------------------------------*/
 
@@ -90,6 +91,7 @@ int main(int argc, char *argv[])
       {"scan", no_argument, NULL, 'S'},
       {"country", required_argument, NULL, 'c'},
       {"port", required_argument, NULL, 'p'},
+      {"player-dir", required_argument, NULL, 'P'},
       {"help", no_argument, NULL, 'h'},
       {"version", no_argument, NULL, 'V'},
       {NULL, 0, NULL, 0}
@@ -99,13 +101,15 @@ int main(int argc, char *argv[])
    char sources_path[PATH_MAX];
    const char *country = DEFAULT_COUNTRY;
    const char *port = DEFAULT_PORT;
+   const char *player_arg = NULL;
+   char player_dir[PATH_MAX];
    BOOLEAN force_scan = FALSE;
    int opt;
 
    /* Line-buffered output, so that progress shows when the output goes to a file */
    setvbuf(stdout, NULL, _IOLBF, 0);
 
-   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:hV", long_opts, NULL)) != -1)
+   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:P:hV", long_opts, NULL)) != -1)
    {
       switch (opt)
       {
@@ -124,6 +128,9 @@ int main(int argc, char *argv[])
          case 'p':
             port = optarg;
             break;
+         case 'P':
+            player_arg = optarg;
+            break;
          case 'V':
             printf("NippApp %s\n", NIPPAPP_VERSION);
             return 0;
@@ -141,6 +148,13 @@ int main(int argc, char *argv[])
    {
       fprintf(stderr, "NippApp: sources file '%s': %s\n", sources_file, strerror(errno));
       return 1;
+   }
+
+   /* The player's files are next to the executable (build/nippapp -> player/), unless given; found
+    * before -d changes the working directory */
+   if (!FindPlayerDir(player_arg, argv[0], player_dir, sizeof(player_dir)))
+   {
+      player_dir[0] = '\0';
    }
 
    /* DVBCore keeps its database (./dtvkit.sqlite3) and NVM file in the working directory */
@@ -194,7 +208,7 @@ int main(int argc, char *argv[])
       }
    }
 
-   if (!NIPPAPP_StopRequested(0) && !HTTPD_Start(port))
+   if (!NIPPAPP_StopRequested(0) && !HTTPD_Start(port, (player_dir[0] != '\0') ? player_dir : NULL))
    {
       return 1;
    }
@@ -226,6 +240,7 @@ static void Usage(const char *name)
       "  -S, --scan             search every source, even if the database has services\n"
       "  -c, --country <code>   ISO 3166 country, which decides LCN allocation (default %s)\n"
       "  -p, --port <port>      HTTP port (default %s)\n"
+      "  -P, --player-dir <dir> web player files (default: player/ next to build/)\n"
       "  -h, --help             show this help\n"
       "  -V, --version          show the version\n", name, DEFAULT_SOURCES, DEFAULT_COUNTRY, DEFAULT_PORT);
 }
@@ -246,6 +261,47 @@ static BOOLEAN InstallSignalHandlers(void)
 
    return (sigaction(SIGINT, &action, NULL) == 0) && (sigaction(SIGTERM, &action, NULL) == 0) &&
       (sigaction(SIGQUIT, &action, NULL) == 0);
+}
+
+static BOOLEAN FindPlayerDir(const char *given, const char *argv0, char *dir, size_t size)
+{
+   char exe[PATH_MAX];
+   char candidate[PATH_MAX + 16];
+   char *slash;
+   ssize_t len;
+
+   if (given != NULL)
+   {
+      if (realpath(given, dir) == NULL)
+      {
+         fprintf(stderr, "NippApp: player directory '%s': %s\n", given, strerror(errno));
+         return FALSE;
+      }
+      return TRUE;
+   }
+
+   len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+   if (len <= 0)
+   {
+      USE_UNWANTED_PARAM(argv0);
+      return FALSE;
+   }
+   exe[len] = '\0';
+
+   /* <dir>/build/nippapp -> <dir>/player */
+   slash = strrchr(exe, '/');
+   if (slash != NULL)
+   {
+      *slash = '\0';
+      slash = strrchr(exe, '/');
+   }
+   if (slash == NULL)
+   {
+      return FALSE;
+   }
+   *slash = '\0';
+   snprintf(candidate, sizeof(candidate), "%s/player", exe);
+   return ((realpath(candidate, dir) != NULL) && (strlen(dir) < size));
 }
 
 /******************************************************************************

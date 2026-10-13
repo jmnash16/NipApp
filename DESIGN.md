@@ -109,9 +109,11 @@ NippApp/
           stbhwplatform.c, stbhwini.c
                          taken from App where they have no UI dependencies
       src/stubs.c        empty AV, OSD, front panel, PVR, VBI and EBU functions
-  player/                (milestone 4)
+  player/
     player.html          new web player (dvbi-client-js for metadata; dash.js + hls.js)
-    vendor/              built dist/ of dvbi-client-js
+    vendor/              made by tools/build-player.sh (not in git): dvbi-client-js, dash.js, hls.js
+  tools/
+    build-player.sh      builds player/vendor/
   third_party/
     mongoose/            mongoose 3.8 (MIT), from the test tool; to be replaced by civetweb
 ```
@@ -231,17 +233,45 @@ FLUTE/ROUTE packets; the bootstrap stream's announcement channel is the
 reference (8.6.1). NippApp serves it at `/time` as xs:dateTime, with the
 `iso`, `xsdate` and `ms` query forms (8.6.3), and inserts or replaces
 `UTCTiming` in served MPDs with `urn:mpeg:dash:utc:http-xsdate:2014` pointing
-at it (9.1.2). This is one path for MPE and GSE. TDT/TOT stays as a fallback
-for older captures (TP37 carries EXT_TIME on only 3 of 11 sessions).
-`flute.c` skips this extension today, so DVBCore needs a change to expose it.
+at it (9.1.2). This is one path for MPE and GSE. TDT/TOT, or the capture timestamps of a PCAP,
+stay as a fallback when no EXT_TIME has been received.
+
+DVBCore's `flute.c` decodes the EXT_TIME sender current time of every packet
+and the NIP library keeps the wall clock from it (`DVBNIP_GetWallClock`),
+moving it only when it is out by more than 0.5 s. All four captures carry
+EXT_TIME. The Eutelsat capture has no TDT/TOT at all, so before this its
+players were given another capture's time and asked for segments that never
+arrive ("stream initialised", then nothing).
+
+With recordings, two carriers from different recordings have different
+times, so while both are tuned the clock follows whichever sent EXT_TIME last.
+That can't happen with live reception.
 
 ## Player
 
-`player/player.html` uses `dvbi-client-js` (`/home/jason/dvbi-client-js`, a
-pure JavaScript DVB-I client) for entry points, lists, LCNs, regions and the
-guide, and dash.js and hls.js for playback. NippApp serves the page and the
-client's Web Worker from its own origin and vendors the client's built `dist/`
-(Node 20.19+ to build).
+`player/player.html` is a DVB-I client: it uses `dvbi-client-js` (a pure
+JavaScript DVB-I client, `~/dvbi-client-js`) to read the entry points at
+`/dvbi/slep.xml`, offers the service lists they name, lists the chosen list's
+services in LCN order with their logos, and plays a service's DASH instance
+with dash.js or its HLS instance with hls.js. NippApp serves it at `/player/`
+from the `player/` directory next to `build/` (or `-P`).
+
+`tools/build-player.sh` makes `player/vendor/`, which is not kept in git: it
+builds dvbi-client-js from its checkout (`npm ci --ignore-scripts`, vite) and
+fetches dash.js 4.7.4 and hls.js 1.5.20 from npm, with their licences. It needs
+Node.js 20.19 or newer and the npm registry the first time; after that the
+gateway needs no internet access to serve the player.
+
+Starting a service: the page fetches the manifest first, which tunes the
+carrier; the gateway answers once the manifest has arrived. Only segments that
+start after joining are received, so the page waits the live delay (4 s), one
+segment and a margin before starting the player. dash.js takes its clock from
+`/time`; hls.js plays the live delay behind the playlist's end. These settings
+are the test tool's.
+
+In dvbi-client-js's results a service instance's delivery is in
+`instance.deliveryParameters` (`type` `dash` with `dash.mpdUrl`, or `hls` with
+`other.url`).
 
 ## Discovery (Phase B)
 
@@ -278,10 +308,6 @@ our captures use FLUTE with Content-Encoding null.
   Inverto and SES searched together, SES's B1 and B2 get 1003 and 1004. The
   registry (milestone 4) serves each broadcast list with its own LCNs, so
   clients are not affected.
-- The Eutelsat capture (`1087000.ts`) gets fallback names and LCNs: its DVB-I
-  list has not arrived when the NIP scan finishes, and the search then moves
-  on, so the later update never happens. App would stay tuned; NippApp needs
-  to wait for the list or come back for it.
 - The MPE carrier service (DVB-NIP-VV) is itself listed as a channel, at LCN
   1000. It should probably be hidden.
 
@@ -311,6 +337,37 @@ our captures use FLUTE with Content-Encoding null.
 
 Done so far:
 
+- The web player (`player/player.html`, `tools/build-player.sh`), served at
+  `/player/`. SES's B1 manifest and HLS playlist are both served on demand.
+- A short capture should loop in the sources file: a tuner still on a capture
+  that has ended has nothing for the next request (the SES PCAP is 64 s).
+- Eutelsat (`1087000.ts`): its headend sends an FDT instance per file, so the
+  announcement carousel looked complete before the entry points and the DVB-I
+  list arrived; the scan ended without them, the registry had nothing to offer
+  and the channels got fallback names and LCNs. DVBCore's NIP scan now waits
+  for the entry points and a DVB-I list as well as the NIF and SIF (a bootstrap
+  stream must carry them, clause 8.1.4.1); a stream without them is completed
+  by the 20 s scan timeout, so searching TP37 or `1067000.ts` takes about 20 s.
+  Eutelsat's channels now get their DVB-I names and LCNs (VandVA1 at 11, ...).
+- Eutelsat also sends its entry points and list with bare Content-Locations
+  (`dvb_i_sl_ep.xml`, `dvb_i_sl_physical.xml`) rather than the URN and
+  `http://dvb.gw/` URLs of clause 8.2.7. The registry takes a bare name as a
+  path from the root, and keeps any entry points document as the gateway's
+  entry points too, whatever its location. `/dvbi/slep.xml` serves the
+  registry's copy first, as the NIP library may still hold another network's
+  under the URN.
+- The NIP library keeps one SIF: the last one received. Inverto and Eutelsat
+  each send their own SIF for network 318, so playing VandVA2 (Inverto's
+  carrier) replaces Eutelsat's SIF with Inverto's, which lists only A2 and B2;
+  Eutelsat's services can then not be tuned until a rescan, and the persisted
+  `sif.xml` is Inverto's after a restart. The library needs to keep the SIFs
+  it receives and merge them.
+- The gateway offers the entry points of the network searched last. Inverto's
+  `1097000.ts` and Eutelsat's `1087000.ts` are one network (318), and
+  Eutelsat's SIF and list cover both carriers: searched in that order, the
+  player offers Eutelsat's list and plays services on both carriers, one tuner
+  each (VandVA1 and VandVA2 at the same time).
+
 - The registry keeps every DVB-I document received on disk; after a restart
   `/dvbi/slep.xml` and the lists are served at once, with no tuning.
 
@@ -326,8 +383,11 @@ Done so far:
   in about 4 s; segments after the join are held until they arrive; the service
   stops and the tuner is released when requests stop, also after a restart.
 - DVBCore fix (`nip_task.c`): the NIP task released its tuner path without
-  stopping the tune, so the tuner kept running. It now calls `STB_DPStopTune`
-  first, which stops the tuner unless another path uses it.
+  stopping the tune, so the tuner kept running. It now calls `ACTL_TuneOff`
+  first, which stops the tuner unless another path uses it. (The first version
+  called `STB_DPStopTune`, below ACTL: ACTL still took the path as tuned to the
+  transport, so a service requested again after its tuner was released was
+  never re-tuned and answered 404.)
 
 Still to do:
 
@@ -341,6 +401,7 @@ Still to do:
   fixed Content-Locations), so after searching Inverto and SES only SES's
   services can be tuned on demand. Serving more than one network needs the NIP
   library to keep signalling per network.
-- The player: `player/player.html` with dvbi-client-js (Node 24 is installed)
-  and dash.js/hls.js, served by NippApp.
+- The player is written and served, and its DVB-I steps (entry points, lists,
+  services and their DASH and HLS URLs) work against the gateway from Node;
+  playback in a browser is still to be confirmed.
 - Entry point query filtering, and the move to civetweb.

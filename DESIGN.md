@@ -218,9 +218,20 @@ checks run every 10 s, so in practice a service stops 20-40 s after its last
 request and the tuner is released 10-20 s after that. The file tuner offers
 more than one tuner path (e.g. 2), so two carriers can be served at once.
 
-The NIP library keeps the SIF, NIF and one DVB-I list on DVBCore's disk
+The NIP library keeps the SIFs, the NIF and one DVB-I list on DVBCore's disk
 (`disks/nip` in the working directory) and rebuilds its service table from
 them at startup, so services can be tuned after a restart without a search.
+The database doesn't keep an MPE carrier's PID (stream lists come from the
+PMT), so after a restart the NIP task finds it once tuned: the service's PMT
+from the PAT, then its DSM-CC type D stream (0x0D), as the search does.
+
+A SIF is identified by its provider (8.4.3.1), and each provider can send its
+own for the same network, so the NIP library keeps one SIF per provider and
+network (up to 8, as `sif.xml`, `sif1.xml`, ...) and the services it can tune
+are those of all of them. A SIF received again unchanged is ignored, which
+matters with two carriers tuned: both send their SIFs on the same announcement
+session, in turn. A provider's SIF is never dropped, only replaced by a newer
+one from the same provider.
 
 Served MPDs list only segments actually available (9.1.2):
 `minimumUpdatePeriod` 2 s, the first MPD held until the client's live point
@@ -295,9 +306,10 @@ mDNS; they load the player from the gateway.
 ## Not yet supported by DVBCore
 
 Mandatory for a DM3 gateway, none implemented yet: ROUTE reception, compressed
-signalling files (FDT Content-Encoding), 48-bit TOIs (`flute.c` keeps 32 bits),
-EXT_TIME and mDNS. For GSE only: ROHC and GSE-Lite link-layer signalling. All
-our captures use FLUTE with Content-Encoding null.
+signalling files (FDT Content-Encoding), 48-bit TOIs (`flute.c` keeps 32 bits)
+and mDNS. For GSE only: ROHC and GSE-Lite link-layer signalling. All our
+captures use FLUTE with Content-Encoding null. (EXT_TIME is now decoded; see
+Clock.)
 
 ## Open points
 
@@ -356,12 +368,24 @@ Done so far:
   entry points too, whatever its location. `/dvbi/slep.xml` serves the
   registry's copy first, as the NIP library may still hold another network's
   under the URN.
-- The NIP library keeps one SIF: the last one received. Inverto and Eutelsat
-  each send their own SIF for network 318, so playing VandVA2 (Inverto's
-  carrier) replaces Eutelsat's SIF with Inverto's, which lists only A2 and B2;
-  Eutelsat's services can then not be tuned until a rescan, and the persisted
-  `sif.xml` is Inverto's after a restart. The library needs to keep the SIFs
-  it receives and merge them.
+- The NIP library kept one SIF: the last one received. Inverto and Eutelsat
+  each send their own SIF for network 318 (Inverto's lists only carrier 801,
+  Eutelsat's both 601 and 801), so playing VandVA2 replaced Eutelsat's SIF and
+  Eutelsat's services could not be tuned until a rescan. DVBCore now keeps a
+  SIF per provider (`nip_mgr.c` `MergeSif`; `nip_xml.c` returns the
+  `NIPNetworkProviderName`, or the older `ProviderName`). With Inverto and
+  Eutelsat searched, VandVA2 and VandVA1 play together for a minute with both
+  SIFs arriving in turn, without the service table changing; AddressSanitizer
+  is clean over a scan, both carriers, a restart and shutdown.
+- MPE services could not be tuned after a restart without a rescan (found
+  while testing the SIF merge): `TuneToNipService` (`nip_task.c`) took the MPE
+  PID from the carrier service's stream list, which the database doesn't keep,
+  so nothing was tuned and the request got 404 after 8 s. GSE needs no PID, so
+  SES was unaffected. Now, when the PID isn't known, the task tunes, filters
+  the PAT for the service's PMT and the PMT for its type 0x0D stream, and then
+  starts the MPE filter (Eutelsat 7011, Inverto 300, as the search finds).
+  Tested after a restart with both carriers, after an idle release and
+  re-tune, and with AddressSanitizer.
 - The gateway offers the entry points of the network searched last. Inverto's
   `1097000.ts` and Eutelsat's `1087000.ts` are one network (318), and
   Eutelsat's SIF and list cover both carriers: searched in that order, the
@@ -377,8 +401,12 @@ Done so far:
   documents to the gateway's address, rewrites MPDs (UTCTiming to `/time`,
   `minimumUpdatePeriod` 2 s), applies the AAC fix, sends CORS headers on every
   response, and serves `/time`, `/dvbi/slep.xml` and an index page.
-- `/time` comes from the file tuner's broadcast clock (TDT/TOT of TS captures,
-  timestamps of PCAP captures) until DVBCore exposes EXT_TIME.
+- `/time` is the NIP wall clock from EXT_TIME (`DVBNIP_GetWallClock`, see
+  Clock), falling back to the file tuner's broadcast clock (TDT/TOT of TS
+  captures, timestamps of PCAP captures). This fixed Eutelsat playback stopping
+  at "stream initialised".
+- Playback in a browser is confirmed: SES's DASH and HLS, and Eutelsat's
+  VandVA1 and VandVA2 together on two tuners.
 - On-demand tuning works: a request for SES's B1 manifest tunes the SES PCAP
   in about 4 s; segments after the join are held until they arrive; the service
   stops and the tuner is released when requests stop, also after a restart.
@@ -397,11 +425,41 @@ Still to do:
 - A file that is neither in the store nor the registry is waited for, then
   404, even when no SIF lists its path. Answering 404 at once for paths the SIF
   doesn't list (8.5.3) needs a lookup the NIP library doesn't offer yet.
-- One network at a time: the NIP library keeps one SIF, NIF and SLEP (they have
-  fixed Content-Locations), so after searching Inverto and SES only SES's
-  services can be tuned on demand. Serving more than one network needs the NIP
-  library to keep signalling per network.
-- The player is written and served, and its DVB-I steps (entry points, lists,
-  services and their DASH and HLS URLs) work against the gateway from Node;
-  playback in a browser is still to be confirmed.
+- One DVB-I list and one NIF: the NIP library still keeps the last one
+  received. The NIF only adds transports to the database, so nothing is lost
+  when it is replaced. The DVB-I list gives the channels' names and LCNs; with
+  two lists (Inverto's `main_service_list.xml` and Eutelsat's), whichever came
+  last names the channels. SIFs are kept per provider.
+- `nip_xml.c` takes any IdentifierBasedDeliveryParameters URI as a service's
+  HLS instance without checking its content type.
+- HLS: DVB-I has no standard HLS delivery for NIP (DASH is the only mandatory
+  format, 9.1; NIP services use DASHDeliveryParameters, 8.3.3.2). To decide:
+  keep the player's HLS button as a labelled extension or hide it when DASH
+  exists, and whether milestone 4's criterion becomes "DASH; HLS where
+  signalled".
+- VandVD1 (DVB-HB) and OTT instances can't be played through the gateway.
 - Entry point query filtering, and the move to civetweb.
+
+## Resume here (state at 2026-10-13)
+
+Milestones 1-3 and the milestone 4 work so far are committed: NippApp
+a75ea2f (player, wall clock, registry fixes), DVBCore 0d681e7 (EXT_TIME wall
+clock, scan waits for the entry points and a DVB-I list, `ACTL_TuneOff`).
+
+Not committed yet: in DVBCore the SIF merge (`dvbnip/src/nip_mgr.c`,
+`dvbnip/src/nip_xml.c`, `dvbnip/src/nip_xml.h`) and MPE tuning after a restart
+(`dvbnip/src/nip_task.c`, `dvbnip/src/nip_task.h`); this file.
+`dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace` are
+local files, not to be committed.
+
+To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:
+
+```
+11471 V 27500 ts /home/jason/DTVkit/Streams/DvbNIP/1097000.ts loop
+11013 H 27500 ts /home/jason/DTVkit/Streams/DvbNIP/1087000.ts loop
+```
+
+then `./build/nippapp -d <dir> -s <file> --scan` and open
+`http://<ip>:8080/player/`.
+
+Next: the decisions on HLS and `nip_xml.c` above, then milestone 5.

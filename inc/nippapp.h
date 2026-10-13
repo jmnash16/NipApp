@@ -52,4 +52,17 @@ BOOLEAN NIPPAPP_Scan(void);
  */
 void NIPPAPP_PrintServices(void);
 
+/**
+ * @brief   Starts the HTTP server, which serves the files the NIP library receives at their
+ *          broadcast paths and tunes services on demand
+ * @param   port TCP port to listen on
+ * @return  TRUE if the server is running
+ */
+BOOLEAN HTTPD_Start(const char *port);
+
+/**
+ * @brief   Stops the HTTP server, waiting for requests in progress to finish
+ */
+void HTTPD_Stop(void);
+
 #endif /* _NIPPAPP_H */

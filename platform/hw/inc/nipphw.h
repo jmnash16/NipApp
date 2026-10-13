@@ -60,6 +60,16 @@ U16BIT TUN_GetNumSources(void);
 const S_SOURCE* TUN_GetSource(U16BIT index);
 
 /**
+ * @brief   Returns the broadcast time: the UTC of the captures being received, taken from the
+ *          TDT/TOT of a TS capture or the timestamps of a PCAP capture, and extrapolated with
+ *          the local clock. It stands in for the NIP wall clock (EXT_TIME) until DVBCore
+ *          provides it.
+ * @param   utc returns the broadcast time in seconds since 1970
+ * @return  TRUE if a broadcast time has been received
+ */
+BOOLEAN TUN_GetBroadcastTime(double *utc);
+
+/**
  * @brief   Passes TS packets from a tuner to every demux whose source is that tuner.
  *          Called on the tuner's feeder thread.
  * @param   tuner_path tuner the packets were received on

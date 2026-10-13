@@ -52,8 +52,13 @@ names are relative to the sources file. The captures live in
 # freq(MHz) pol  symrate  kind  file                                  end
 11471       V    27500    ts    ../Streams/DvbNIP/1097000.ts          stop
 11013       H    27500    ts    ../Streams/DvbNIP/1087000.ts          stop
-10900       H    30000    pcap  ../Streams/DvbNIP/2025-02-11_1min.pcap stop
+11141       H    23500    pcap  ../Streams/DvbNIP/2025-02-11_1min.pcap stop
 ```
+
+A source must have the carrier's real tuning parameters, as its NIF gives
+them: a search tunes what the sources file says, but on-demand tuning tunes
+what the NIF says. The SES capture is carrier 1045 at 11141 MHz H 23.5 Msym/s;
+TP37's carrier is at 11023 MHz H 23.5 Msym/s.
 
 DVBCore tunes a universal LNB. The file tuner therefore works out the RF
 frequency from the IF plus the local oscillator that the 22 kHz tone selects
@@ -90,7 +95,7 @@ NippApp/
     search.c             first-run setup (country, satellite/LNB records) and scans
     registry.c           local service list registry: entry points, lists, query filtering (milestone 4)
     guide.c              content guide endpoint (Phase 5)
-    httpd.c              HTTP server: player, registry, media, /time, admin/status (milestone 4)
+    httpd.c              HTTP server: broadcast files, DVB-I rewriting, /time, /dvbi/slep.xml (milestone 4)
     mdns.c               DNS-SD/mDNS announcement (Phase B)
   platform/
     COPIED.md            files copied from App, with their source and changes
@@ -107,8 +112,8 @@ NippApp/
   player/                (milestone 4)
     player.html          new web player (dvbi-client-js for metadata; dash.js + hls.js)
     vendor/              built dist/ of dvbi-client-js
-  third_party/           (milestone 4)
-    mongoose.c/.h        HTTP library (to be replaced by a current mongoose or civetweb)
+  third_party/
+    mongoose/            mongoose 3.8 (MIT), from the test tool; to be replaced by civetweb
 ```
 
 NippApp keeps its own copy of the platform layer rather than building from
@@ -170,6 +175,7 @@ is always the broadcast path.
 | broadcast path of each DVB-I list | the list as broadcast, with `http://dvb.gw/` changed to the gateway's address (Annex F.2.1) |
 | broadcast path of the content guide manifest | the content guide endpoint: `?sid&start&end`, `?sid&now_next=true` (Annex D.6.2; Phase 5) |
 | any other broadcast path | manifests, segments and other files from the file store |
+| `/dvbi/slep.xml` | the DVB-I service list entry points, which the broadcast identifies only by URN (`urn:dvb:metadata:nativeip:dvb-i-slep`, 8.2.5.1), so the gateway chooses the URL (8.1.7.3) |
 | `/time` | the NIP wall clock (8.6.3) |
 | `/api/status`, `/api/scan` | admin only: sources, tuners, sessions, store usage; start a rescan. The player never uses these. |
 
@@ -195,8 +201,13 @@ As 8.5.3 sets out:
 
 A service is started through the existing `nip_mgr` logic (`TuneToNipService`),
 stops after 20 s without requests, and its tuner is released 10 s later. The
-file tuner offers more than one tuner path (e.g. 2), so two carriers can be
-served at once.
+checks run every 10 s, so in practice a service stops 20-40 s after its last
+request and the tuner is released 10-20 s after that. The file tuner offers
+more than one tuner path (e.g. 2), so two carriers can be served at once.
+
+The NIP library keeps the SIF, NIF and one DVB-I list on DVBCore's disk
+(`disks/nip` in the working directory) and rebuilds its service table from
+them at startup, so services can be tuned after a restart without a search.
 
 Served MPDs list only segments actually available (9.1.2):
 `minimumUpdatePeriod` 2 s, the first MPD held until the client's live point
@@ -284,3 +295,36 @@ our captures use FLUTE with Content-Encoding null.
   every transport in the database as a TS channel search, including NIP
   transports from the NIF and SIF. It is now a frequency search of the one
   carrier (`ap_cntrl.c`).
+
+## Milestone 4 progress
+
+Done so far:
+
+- The HTTP server (`src/httpd.c`, mongoose 3.8 from the test tool, port `-p`,
+  default 8080) serves files at their broadcast paths, waits up to 8 s for
+  broadcast files not received yet, rewrites `http://dvb.gw/` in DVB-I
+  documents to the gateway's address, rewrites MPDs (UTCTiming to `/time`,
+  `minimumUpdatePeriod` 2 s), applies the AAC fix, sends CORS headers on every
+  response, and serves `/time`, `/dvbi/slep.xml` and an index page.
+- `/time` comes from the file tuner's broadcast clock (TDT/TOT of TS captures,
+  timestamps of PCAP captures) until DVBCore exposes EXT_TIME.
+- On-demand tuning works: a request for SES's B1 manifest tunes the SES PCAP
+  in about 4 s; segments after the join are held until they arrive; the service
+  stops and the tuner is released when requests stop, also after a restart.
+- DVBCore fix (`nip_task.c`): the NIP task released its tuner path without
+  stopping the tune, so the tuner kept running. It now calls `STB_DPStopTune`
+  first, which stops the tuner unless another path uses it.
+
+Still to do:
+
+- Registry: the SLEP and most DVB-I lists are only in the NIP library's memory,
+  so after a restart they are not served until their carrier is tuned. NippApp
+  should keep its own copy of every DVB-I document it receives (the file store
+  callback) and serve that when the store has none.
+- One network at a time: the NIP library keeps one SIF, NIF and SLEP (they have
+  fixed Content-Locations), so after searching Inverto and SES only SES's
+  services can be tuned on demand. Serving more than one network needs the NIP
+  library to keep signalling per network.
+- The player: `player/player.html` with dvbi-client-js (Node 24 is installed)
+  and dash.js/hls.js, served by NippApp.
+- Entry point query filtering, and the move to civetweb.

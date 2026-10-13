@@ -101,6 +101,10 @@ void STB_DSKInitialise(void)
    /* Create a semaphore to control access to disk info */
    disk_sem = STB_OSCreateSemaphore();
 
+   /* NippApp: find the disks before returning, so that they are there when DVBCore's
+    * initialisation reads files back (DVBNIP_Init restores the NIP services from disk) */
+   CheckMountedDisks(FALSE);
+
    /* Create a task to monitor addition/removal of disks */
    STB_OSCreateTask(DiskMonitorTask, NULL, 4096, 7, (U8BIT *)"DiskMonitor");
 
@@ -1324,10 +1328,6 @@ static S_DISK_INFO* FindDisk(U16BIT disk_id)
 static void DiskMonitorTask(void *param)
 {
    USE_UNWANTED_PARAM(param);
-
-   /* Mount any disks already available on startup, but don't send mount events
-    * as there won't be anything to handle them during startup */
-   CheckMountedDisks(FALSE);
 
    while (1)
    {

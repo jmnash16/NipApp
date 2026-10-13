@@ -69,6 +69,7 @@
 #define MAX_PCR_JUMP_SECS     10.0     /* a PCR jump larger than this is a discontinuity */
 
 #define NO_SOURCE             0xffff
+#define CLOCK_MAX_ERROR_SECS  2.0      /* a broadcast time further than this from the clock resets it */
 
 #define PCAP_HEADER_SIZE      24
 #define PCAP_RECORD_SIZE      16
@@ -152,6 +153,12 @@ static U16BIT num_sources = 0;
 static U8BIT num_paths = 0;
 static S_TUNER tuners[NUM_TUNER_PATHS];
 
+/* Broadcast clock, from the TDT/TOT of TS captures or the timestamps of PCAP captures */
+static pthread_mutex_t clock_mutex = PTHREAD_MUTEX_INITIALIZER;
+static BOOLEAN clock_valid = FALSE;
+static double clock_utc;              /* broadcast UTC at the anchor, seconds since 1970 */
+static double clock_local;            /* local monotonic time at the anchor */
+
 /*---local function prototypes for this file----------------------------------*/
 static BOOLEAN ParseSourceLine(char *line, const char *base_dir, S_SOURCE *source);
 static U16BIT FindSource(S_TUNER *tuner);
@@ -173,6 +180,7 @@ static void ResetPacing(S_PACING *pacing);
 static void PaceToStreamTime(S_PACING *pacing, double stream_time);
 static void InspectPacket(S_PACING *pacing, const U8BIT *packet);
 static void PaceByTdt(S_PACING *pacing);
+static void SetBroadcastTime(double utc);
 
 /*---global function definitions---------------------------------------------*/
 
@@ -242,6 +250,21 @@ U16BIT TUN_GetNumSources(void)
 const S_SOURCE* TUN_GetSource(U16BIT index)
 {
    return (index < num_sources) ? &sources[index] : NULL;
+}
+
+BOOLEAN TUN_GetBroadcastTime(double *utc)
+{
+   BOOLEAN valid;
+
+   pthread_mutex_lock(&clock_mutex);
+   valid = clock_valid;
+   if (valid)
+   {
+      *utc = clock_utc + (MonotonicNow() - clock_local);
+   }
+   pthread_mutex_unlock(&clock_mutex);
+
+   return valid;
 }
 
 void STB_TuneInitialise(U8BIT paths)
@@ -355,6 +378,10 @@ void STB_TuneStopTuner(U8BIT path)
    if (path < num_paths)
    {
       pthread_mutex_lock(&tuners[path].mutex);
+      if (tuners[path].thread_running)
+      {
+         printf("NippApp: tuner %u: stopped\n", path);
+      }
       StopFeeder(&tuners[path]);
       tuners[path].locked = FALSE;
       pthread_mutex_unlock(&tuners[path].mutex);
@@ -976,6 +1003,7 @@ static void FeedPcap(S_TUNER *tuner, const S_SOURCE *source)
       timestamp = PcapU32(tuner, record) +
          (PcapU32(tuner, record + 4) / (tuner->pcap_nano ? 1e9 : 1e6));
       PaceToStreamTime(&tuner->pacing, timestamp);
+      SetBroadcastTime(timestamp);
 
       if (GetIpPacket(tuner->pcap_linktype, data, len, &ip, &ip_len, &protocol))
       {
@@ -1269,9 +1297,9 @@ static void InspectPacket(S_PACING *pacing, const U8BIT *packet)
       return;
    }
 
-   /* TDT/TOT: a section starting in this packet, with the UTC time at bytes 3-7 */
-   if ((pid != TDT_PID) || (pacing->pcr_pid != 0x1fff) || ((packet[1] & 0x40) == 0) ||
-       ((packet[3] & 0x10) == 0))
+   /* TDT/TOT: a section starting in this packet, with the UTC time at bytes 3-7. It sets the
+    * broadcast clock, and paces captures that have no PCR. */
+   if ((pid != TDT_PID) || ((packet[1] & 0x40) == 0) || ((packet[3] & 0x10) == 0))
    {
       return;
    }
@@ -1300,6 +1328,12 @@ static void InspectPacket(S_PACING *pacing, const U8BIT *packet)
       ((((section[5] >> 4) * 10) + (section[5] & 0x0f)) * 3600) +
       ((((section[6] >> 4) * 10) + (section[6] & 0x0f)) * 60) +
       (((section[7] >> 4) * 10) + (section[7] & 0x0f));
+
+   SetBroadcastTime(utc);
+   if (pacing->pcr_pid != 0x1fff)
+   {
+      return;
+   }
 
    if (!pacing->have_tdt)
    {
@@ -1333,6 +1367,23 @@ static void PaceByTdt(S_PACING *pacing)
       PaceToStreamTime(pacing, pacing->last_tdt +
          ((double)(pacing->bytes - pacing->last_tdt_bytes) / pacing->byte_rate));
    }
+}
+
+/* Keeps the broadcast clock to the times received. The TDT has a resolution of one second and
+ * arrives about once a second, so the clock is only moved when it is out by more than that. */
+static void SetBroadcastTime(double utc)
+{
+   double now = MonotonicNow();
+
+   pthread_mutex_lock(&clock_mutex);
+   if (!clock_valid || (utc - (clock_utc + (now - clock_local)) > CLOCK_MAX_ERROR_SECS) ||
+       ((clock_utc + (now - clock_local)) - utc > CLOCK_MAX_ERROR_SECS))
+   {
+      clock_utc = utc;
+      clock_local = now;
+      clock_valid = TRUE;
+   }
+   pthread_mutex_unlock(&clock_mutex);
 }
 
 /******************************************************************************

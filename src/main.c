@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -40,6 +41,12 @@
 #define NIPPAPP_VERSION    "0.1.0"
 #define DEFAULT_SOURCES    "sources.conf"
 #define DEFAULT_COUNTRY    "gbr"
+#define DEFAULT_PORT       "8080"
+
+/* DVBCore's disks are the directories under ./disks; the NIP library keeps the SIF, NIF and
+ * DVB-I list there, so that the services can be tuned after a restart */
+#define DISKS_DIR          "disks"
+#define NIP_DISK_DIR       "disks/nip"
 
 /*---local (static) variable declarations for this file-----------------------*/
 /* Posted by the signal handler; sem_post is async-signal-safe */
@@ -82,6 +89,7 @@ int main(int argc, char *argv[])
       {"sources", required_argument, NULL, 's'},
       {"scan", no_argument, NULL, 'S'},
       {"country", required_argument, NULL, 'c'},
+      {"port", required_argument, NULL, 'p'},
       {"help", no_argument, NULL, 'h'},
       {"version", no_argument, NULL, 'V'},
       {NULL, 0, NULL, 0}
@@ -90,13 +98,14 @@ int main(int argc, char *argv[])
    const char *sources_file = DEFAULT_SOURCES;
    char sources_path[PATH_MAX];
    const char *country = DEFAULT_COUNTRY;
+   const char *port = DEFAULT_PORT;
    BOOLEAN force_scan = FALSE;
    int opt;
 
    /* Line-buffered output, so that progress shows when the output goes to a file */
    setvbuf(stdout, NULL, _IOLBF, 0);
 
-   while ((opt = getopt_long(argc, argv, "d:s:Sc:hV", long_opts, NULL)) != -1)
+   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:hV", long_opts, NULL)) != -1)
    {
       switch (opt)
       {
@@ -111,6 +120,9 @@ int main(int argc, char *argv[])
             break;
          case 'c':
             country = optarg;
+            break;
+         case 'p':
+            port = optarg;
             break;
          case 'V':
             printf("NippApp %s\n", NIPPAPP_VERSION);
@@ -135,6 +147,13 @@ int main(int argc, char *argv[])
    if ((work_dir != NULL) && (chdir(work_dir) != 0))
    {
       fprintf(stderr, "NippApp: cannot use directory '%s': %s\n", work_dir, strerror(errno));
+      return 1;
+   }
+
+   if (((mkdir(DISKS_DIR, 0755) != 0) && (errno != EEXIST)) ||
+       ((mkdir(NIP_DISK_DIR, 0755) != 0) && (errno != EEXIST)))
+   {
+      fprintf(stderr, "NippApp: cannot create %s: %s\n", NIP_DISK_DIR, strerror(errno));
       return 1;
    }
 
@@ -175,10 +194,17 @@ int main(int argc, char *argv[])
       }
    }
 
+   if (!NIPPAPP_StopRequested(0) && !HTTPD_Start(port))
+   {
+      return 1;
+   }
+
    /* Everything else runs on DVBCore's tasks; the main thread waits for a stop request */
    while (!NIPPAPP_StopRequested(1000))
    {
    }
+
+   HTTPD_Stop();
 
    printf("NippApp: signal %d, shutting down\n", (int)stop_signal);
 
@@ -198,8 +224,9 @@ static void Usage(const char *name)
       "  -s, --sources <file>   sources file mapping carriers to captures (default %s)\n"
       "  -S, --scan             search every source, even if the database has services\n"
       "  -c, --country <code>   ISO 3166 country, which decides LCN allocation (default %s)\n"
+      "  -p, --port <port>      HTTP port (default %s)\n"
       "  -h, --help             show this help\n"
-      "  -V, --version          show the version\n", name, DEFAULT_SOURCES, DEFAULT_COUNTRY);
+      "  -V, --version          show the version\n", name, DEFAULT_SOURCES, DEFAULT_COUNTRY, DEFAULT_PORT);
 }
 
 static void SignalHandler(int sig)

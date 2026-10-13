@@ -19,6 +19,7 @@ CC ?= cc
 SRCS = src/main.c \
        src/search.c \
        src/events.c \
+       src/httpd.c \
        platform/os/stbos_event.c \
        platform/os/stbos_mutex.c \
        platform/os/stbos_queue.c \
@@ -35,10 +36,12 @@ SRCS = src/main.c \
        platform/hw/src/stbhwplatform.c \
        platform/hw/src/stbhwsp.c \
        platform/hw/src/stbhwtun.c \
-       platform/hw/src/stubs.c
+       platform/hw/src/stubs.c \
+       third_party/mongoose/mongoose.c
 
 INCLUDES = inc \
            platform/hw/inc \
+           third_party/mongoose \
            $(DVBCORE_ROOT)/inc \
            $(DVBCORE_ROOT)/platform/inc \
            $(DVBCORE_ROOT)/midware/stb/inc \
@@ -47,6 +50,9 @@ INCLUDES = inc \
 
 # Must match the DVBCore build so that shared structures have the same layout
 DEFINES = OSD_32_BIT COLOUR_DEPTH=32 DVBNIP_BUILD _FILE_OFFSET_BITS=64
+
+# mongoose 3.8 (MIT): no TLS or CGI, and its warnings are not NippApp's
+$(BUILD_DIR)/obj/third_party/mongoose/mongoose.o: CFLAGS += -DNO_SSL -DNO_CGI -w
 
 CFLAGS += -Wall $(addprefix -D,$(DEFINES)) $(addprefix -I,$(INCLUDES)) -MMD -MP
 ifeq ($(DEBUG),0)

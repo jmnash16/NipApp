@@ -17,7 +17,7 @@ copied on 8 Oct 2026 from App at `82bebdb`. The paths below are relative to
 | `hw/inc/types_int.h` | `hw/linux/inc/types_int.h` | none |
 | `hw/src/celo.c`, `hw/src/celo.h` | `hw/linux/src/` | none |
 | `hw/src/stbhwcrypt.c` | `hw/linux/src/stbhwcrypt.c` | none |
-| `hw/src/stbhwdsk.c` | `hw/linux/src/stbhwdsk.c` | none |
+| `hw/src/stbhwdsk.c` | `hw/linux/src/stbhwdsk.c` | the disks under `./disks` are found in `STB_DSKInitialise`, before DVBCore reads files back, not first on the monitor task |
 | `hw/src/stbhwini.c` | `hw/linux/src/stbhwini.c` | no signal trapping: `main()` handles signals and saves the database |
 | `hw/src/stbhwmem.c` | `hw/linux/src/stbhwmem.c` | none |
 | `hw/src/stbhwnet.c` | `hw/linux/src/stbhwnet.c` | none |
@@ -34,6 +34,10 @@ These files are NippApp's own and are not copies:
 - `hw/inc/nipphw.h`: the interface between the tuner and the demux.
 - `hw/src/stubs.c`: AV, OSD, PVR, front panel, VBI and EBU functions, which a
   headless gateway does not need.
+
+`third_party/mongoose/` is mongoose 3.8 (MIT licence, in `LICENSE`), copied from
+`DVBCore/dvbnip/test` at `9bea543`. Later mongoose releases are GPL; the plan is
+to move to civetweb, the MIT fork of mongoose 3.8, which has nearly the same API.
 
 Many of the copied files are ISO-8859-1 encoded. Use `grep -a` on them, or
 matches are silently skipped.

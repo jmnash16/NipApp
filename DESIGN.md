@@ -34,10 +34,14 @@ There is no tuner hardware yet, so the first inputs are files:
 | PCAP file (e.g. SES `2025-02-11_1min.pcap`) | a satellite **GSE** transport (`use_gse`) | tuner → GSE data callback → `GSE_DataIn` → `DVBNIP_InjectIP` |
 
 A PCAP holds IP packets that were already taken out of a GSE carrier. The
-PCAP input therefore wraps each IP packet in a GSE packet and passes it to the
-callback DVBCore registers with `STB_TuneSetGSEDataCallback`. That runs the
-real GSE search (`APP_SI_MODE_GSE_NO_SI`, `ManageDVBNIPGSE`) with no changes
-to DVBCore.
+PCAP input therefore wraps each IP packet in one GSE packet (start and end
+set, no label, protocol type 0x0800 or 0x86DD) and passes it to the callback
+DVBCore registers with `STB_TuneSetGSEDataCallback`. That runs the real GSE
+search (`APP_SI_MODE_GSE_NO_SI`, `ManageDVBNIPGSE`). Classic PCAP files are
+read (not pcapng), with micro- or nanosecond timestamps in either byte order,
+and Ethernet (with or without a VLAN tag), raw IP or Linux cooked frames. IP
+packets are paced by their capture timestamps. A mutex held across the
+callback lets DVBCore clear it and free its GSE context safely.
 
 A sources file (`-s`, default `sources.conf`) maps carriers to files. Each
 line is `freq(MHz) pol symrate(ksym/s) kind file [loop|stop]`. Relative file
@@ -66,9 +70,10 @@ the file the source loops or stops; a stopped source leaves the tuner locked
 with no data.
 
 Every stream carries NIP Actual Carrier Information (TSI 1 on the announcement
-address, LCT extension 68, every 250 ms; 8.7). NippApp reads it to confirm
-which carrier is tuned; for PCAP input it is the only source of the carrier's
-identity.
+address, LCT extension 68, every 250 ms; 8.7). For PCAP input, which is the
+only record of the carrier's identity, the tuner logs it the first time it
+appears after a tune. The SES capture is network 1, carrier 1045, link 1,
+provider "SES"; TP37 carries none.
 
 ## Structure
 
@@ -77,27 +82,32 @@ NippApp/
   Makefile               builds against DVBCore's libdvbcore.a
   DESIGN.md
   sources.conf           example sources file
+  inc/
+    nippapp.h            interfaces between NippApp's own modules
   src/
     main.c               options, startup, main loop, shutdown
-    events.c             DVBCore event handler (search progress, NIP ready, updates)
-    search.c             first-run setup (satellite/LNB records) and scans
-    registry.c           local service list registry: entry points, lists, query filtering
+    events.c             DVBCore event handler (logging for now)
+    search.c             first-run setup (country, satellite/LNB records) and scans
+    registry.c           local service list registry: entry points, lists, query filtering (milestone 4)
     guide.c              content guide endpoint (Phase 5)
-    httpd.c              HTTP server: player, registry, media, /time, admin/status
+    httpd.c              HTTP server: player, registry, media, /time, admin/status (milestone 4)
     mdns.c               DNS-SD/mDNS announcement (Phase B)
   platform/
+    COPIED.md            files copied from App, with their source and changes
     os/                  copy of App/platform/os/linux (tasks, mutexes, queues, clock)
     hw/
-      stbhwtun.c         file tuner: sources file, lock, TS feeder, PCAP→GSE feeder
-      stbhwdmx.c         section/PID filtering, trimmed from App's (no video/audio decoding)
-      stbhwmem.c, stbhwdsk.c, stbhwnvm.c, stbhwcrypt.c, stbhwsp.c, stbhwini.c
+      inc/nipphw.h       sources and the tuner-to-demux link (not DVBCore's platform API)
+      inc/stbhwdef.h     platform sizes, copied from App (2 tuner paths)
+      src/stbhwtun.c     file tuner: sources file, lock, TS feeder, PCAP→GSE feeder
+      src/stbhwdmx.c     section filtering, written for NippApp (no PES or decoding)
+      src/stbhwmem.c, stbhwdsk.c, stbhwnet.c, stbhwcrypt.c, celo.c, stbhwsp.c,
+          stbhwplatform.c, stbhwini.c
                          taken from App where they have no UI dependencies
-      stubs.c            empty video/audio, OSD, front panel, PVR, upgrade, media player
-  player/
+      src/stubs.c        empty AV, OSD, front panel, PVR, VBI and EBU functions
+  player/                (milestone 4)
     player.html          new web player (dvbi-client-js for metadata; dash.js + hls.js)
     vendor/              built dist/ of dvbi-client-js
-  platform/COPIED.md     files copied from App, with their source and changes
-  third_party/
+  third_party/           (milestone 4)
     mongoose.c/.h        HTTP library (to be replaced by a current mongoose or civetweb)
 ```
 
@@ -119,27 +129,32 @@ network need real code; the rest are stubs, added as the linker asks for them.
 1. DVBCore is built as usual with `DTVKIT_INTEGRATE_DVBNIP=1`,
    `DTVKIT_INTEGRATE_SQLITE=1` and a 64-bit environment.
 2. NippApp's Makefile builds its own sources plus the platform layer, then
-   links with `libdvbcore.a`, `sqlite3`, `xml2` and `pthread`. No SDL, ffmpeg,
-   Lua or Qt.
+   links with `libdvbcore.a`, `sqlite3`, `xml2`, `jpeg`, `png`, `z` and
+   `pthread` (DVBCore's image decoding needs jpeg and png). No SDL, ffmpeg,
+   Lua or Qt. `make ASAN=1` builds with AddressSanitizer; run `make clean`
+   when switching between the two.
 3. The build defines `DVBNIP_BUILD`, the same as DVBCore.
 
 ## Startup and scanning
 
 1. `APP_InitialiseDVB(EventHandler, DVB_INIT_NO_TELETEXT_OR_SUBTITLES)`.
-2. On first run (empty database), create a satellite and LNB record.
-3. Set DVBCore's country (`-c`, default `gbr`) if it is not set already. The
+2. Set DVBCore's country (`-c`, default `gbr`) if it is not set already. The
    country decides LCN allocation; App asks for it in its first-time setup.
    Without one, no satellite LCNs are allocated.
-4. If the database has no services, or `--scan` is given:
-   `ASI_SetSearchServiceType(SEARCH_SERVICE_TYPE_DVBNIP | ..._DVBNIP_GSE)`, then
-   `ACTL_StartManualSearch(SIGNAL_QPSK, params, ...)` for each sources entry,
-   one at a time, with `is_gse` set for PCAP entries. The event handler
-   advances to the next entry when each search completes. The sources file
-   stands in for the preset bootstrap stream list of Annex C.4.1.
-5. Services found by DVBCore go into the database through `DVBNIP_AddServices`
+3. If the database has no services, or `--scan` is given, search each sources
+   entry in turn. The first search creates a satellite record ("NippApp") and
+   a universal LNB if there is no satellite yet. Each search sets
+   `ASI_SetSearchServiceType(SEARCH_SERVICE_TYPE_ALL | SEARCH_SERVICE_TYPE_DVBNIP)`
+   (plus `SEARCH_SERVICE_TYPE_DVBNIP_GSE` for PCAP entries) and calls
+   `ACTL_StartManualSearch(SIGNAL_QPSK, params, ...)`: `ACTL_FREQ_SEARCH` for
+   TS, `ACTL_DVBNIP_GSE_SEARCH` with `is_gse` for PCAP. The main thread polls
+   `ACTL_IsSearchComplete()` (as App does on UI update events), with a 180 s
+   limit, then finishes the search and the database as App does. The sources
+   file stands in for the preset bootstrap stream list of Annex C.4.1.
+4. Services found by DVBCore go into the database through `DVBNIP_AddServices`
    (stable IDs, DVB-I names and LCNs); a metadata change later re-runs it via
    `NIPTASK_UPDATESERVICES`.
-6. Start the HTTP server (and, in Phase B, the mDNS announcement).
+5. Start the HTTP server (and, in Phase B, the mDNS announcement).
 
 ## Serving
 
@@ -234,11 +249,13 @@ our captures use FLUTE with Content-Encoding null.
 
 ## Open points
 
-- `stbhwdmx.c` from App is 2,500 lines and mixes section filtering with
-  video/audio PES handling; how much to trim will be clear in milestone 1.
-- The PCAP has no tuning information. Its tuning parameters come from the
-  sources file; the NIF in the SES capture names network 1, carrier 1045, and
-  its NACI confirms which carrier it is.
+- A PCAP has no tuning information, so its sources entry is made up. The
+  NACI gives its identity (SES: network 1, carrier 1045), but there is no
+  check yet that the NIF's parameters for that carrier match the entry.
+- DVBCore has one LCN space, so lists that ask for the same LCNs clash: with
+  Inverto and SES searched together, SES's B1 and B2 get 1003 and 1004. The
+  registry (milestone 4) serves each broadcast list with its own LCNs, so
+  clients are not affected.
 - The Eutelsat capture (`1087000.ts`) gets fallback names and LCNs: its DVB-I
   list has not arrived when the NIP scan finishes, and the search then moves
   on, so the later update never happens. App would stay tuned; NippApp needs
@@ -253,3 +270,17 @@ our captures use FLUTE with Content-Encoding null.
   started the NIP scan. DVBCore's search now also recognises the MPE stream by
   its PMT stream type 0x0D, as DVB-NIP clause 7.3.3 requires (`ap_si.c`,
   `FindPmtMpePid`). The PMT is read before `ProcessPmtTable`, which frees it.
+
+## Milestone 3 findings
+
+- The GSE search works through the PCAP input with no change to DVBCore's GSE
+  code: the SES capture gives B1, B2 and C1 (LCNs 1-3) and Inverto 1-3 (LCNs
+  5-7, on another carrier in the SIF), TP37 gives s0, s1 and B1. A rescan
+  creates no duplicates; an AddressSanitizer run over TS and both PCAPs shows
+  no errors or leaks.
+- DVBCore ran a manual GSE search as a network search
+  (`ACTL_StartManualSearch` sent `ACTL_DVBNIP_GSE_SEARCH` to the
+  `SEARCH_TYPE_MANUAL_NETWORK` branch). After the first carrier it retuned
+  every transport in the database as a TS channel search, including NIP
+  transports from the NIF and SIF. It is now a frequency search of the one
+  carrier (`ap_cntrl.c`).

@@ -26,8 +26,9 @@ copied on 8 Oct 2026 from App at `82bebdb`. The paths below are relative to
 
 These files are NippApp's own and are not copies:
 
-- `hw/src/stbhwtun.c`: the file tuner. It reads the sources file and feeds TS
-  captures in real time, paced by PCR, or by TDT when there is no PCR.
+- `hw/src/stbhwtun.c`: the file tuner. It reads the sources file and feeds
+  captures in real time: TS to the demux, paced by PCR or by TDT when there is
+  no PCR; PCAP as GSE to DVBCore's GSE callback, paced by capture timestamps.
 - `hw/src/stbhwdmx.c`: the demux. Section filtering only, using App's filter
   ID scheme, with no audio, video or teletext PES handling.
 - `hw/inc/nipphw.h`: the interface between the tuner and the demux.

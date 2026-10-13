@@ -17,11 +17,17 @@
  *          capture. DVBCore tunes a universal LNB, so the RF frequency is the IF plus the
  *          local oscillator the 22 kHz tone selects (9750 or 10600 MHz), and the polarisation
  *          is given by the LNB voltage (18 V horizontal, 13/14 V vertical). A tune that
- *          matches a TS source locks, and a feeder thread passes the file's packets to the
- *          demux in real time: paced by PCR, or by TDT and the average bitrate when the
- *          capture has no PCR. Anything else reports no lock, as an empty transponder would.
+ *          matches a source locks, and a feeder thread passes the capture on in real time.
+ *          Anything else reports no lock, as an empty transponder would.
  *
- *          PCAP sources (fed as GSE) are milestone 3; for now they do not lock.
+ *          A TS capture goes to the demux, paced by PCR, or by TDT and the average bitrate
+ *          when the capture has no PCR.
+ *
+ *          A PCAP capture holds IP packets already taken out of a GSE carrier. Each packet is
+ *          wrapped in a GSE packet (start and end set, no label) and passed to the callback
+ *          DVBCore registers with STB_TuneSetGSEDataCallback, paced by the capture timestamps.
+ *          The NIP Actual Carrier Information (TS 103 876 clause 8.7) is logged when it is
+ *          first seen, as it is the only record of which carrier a PCAP came from.
  * @file    stbhwtun.c
  */
 
@@ -64,6 +70,28 @@
 
 #define NO_SOURCE             0xffff
 
+#define PCAP_HEADER_SIZE      24
+#define PCAP_RECORD_SIZE      16
+#define PCAP_MAX_RECORD       262144
+#define LINKTYPE_ETHERNET     1
+#define LINKTYPE_RAW          101
+#define LINKTYPE_LINUX_SLL    113
+
+#define ETHERTYPE_IPV4        0x0800
+#define ETHERTYPE_IPV6        0x86dd
+#define ETHERTYPE_VLAN        0x8100
+
+/* GSE packet header for a whole PDU: start and end set, label type 2 (no label) */
+#define GSE_FLAGS_NO_LABEL    0xe0
+#define GSE_HEADER_SIZE       4        /* flags/length (2), protocol type (2) */
+#define GSE_MAX_PDU           (0x0fff - 2)
+
+/* NIP Actual Carrier Information: 224.0.23.14:3937, TSI 1, LCT header extension 68 */
+#define NACI_ADDRESS          0xe000170e
+#define NACI_PORT             3937
+#define NACI_TSI              1
+#define NACI_HET              68
+
 /*---local typedef structs for this file--------------------------------------*/
 typedef struct
 {
@@ -95,6 +123,7 @@ typedef struct
    U32BIT if_khz;
    U32BIT srate;
    BOOLEAN use_gse;
+   pthread_mutex_t gse_mutex; /* held while the GSE callback runs, so it can't be cleared mid-call */
    GSE_PacketCallback gse_callback;
    void *gse_user_data;
 
@@ -105,9 +134,15 @@ typedef struct
    BOOLEAN thread_running;
    volatile BOOLEAN stop;
    FILE *file;
-   long sync_offset;
+   long sync_offset;          /* where the data starts: first TS packet, or first PCAP record */
    S_PACING pacing;
    U8BIT path;
+
+   /* PCAP format */
+   BOOLEAN pcap_swapped;      /* little-endian file */
+   BOOLEAN pcap_nano;         /* nanosecond timestamps */
+   U32BIT pcap_linktype;
+   BOOLEAN naci_seen;
 } S_TUNER;
 
 /*---local (static) variable declarations for this file-----------------------*/
@@ -121,8 +156,17 @@ static S_TUNER tuners[NUM_TUNER_PATHS];
 static BOOLEAN ParseSourceLine(char *line, const char *base_dir, S_SOURCE *source);
 static U16BIT FindSource(S_TUNER *tuner);
 static BOOLEAN OpenTS(S_TUNER *tuner, const S_SOURCE *source);
+static BOOLEAN OpenPcap(S_TUNER *tuner, const S_SOURCE *source);
 static void StopFeeder(S_TUNER *tuner);
 static void* FeederThread(void *param);
+static BOOLEAN EndOfFile(S_TUNER *tuner, const S_SOURCE *source);
+static void FeedTS(S_TUNER *tuner, const S_SOURCE *source);
+static void FeedPcap(S_TUNER *tuner, const S_SOURCE *source);
+static U32BIT PcapU32(S_TUNER *tuner, const U8BIT *data);
+static BOOLEAN GetIpPacket(U32BIT linktype, U8BIT *data, U32BIT len, U8BIT **ip, U16BIT *ip_len,
+   U16BIT *protocol);
+static void CheckNaci(S_TUNER *tuner, const U8BIT *ip, U16BIT ip_len);
+static void DeliverGse(S_TUNER *tuner, U8BIT *gse, const U8BIT *ip, U16BIT ip_len, U16BIT protocol);
 static double MonotonicNow(void);
 static void SleepUntil(S_PACING *pacing, double target);
 static void ResetPacing(S_PACING *pacing);
@@ -211,6 +255,7 @@ void STB_TuneInitialise(U8BIT paths)
    for (i = 0; i < num_paths; i++)
    {
       pthread_mutex_init(&tuners[i].mutex, NULL);
+      pthread_mutex_init(&tuners[i].gse_mutex, NULL);
       tuners[i].source = NO_SOURCE;
       tuners[i].path = i;
       tuners[i].pacing.stop = &tuners[i].stop;
@@ -262,22 +307,19 @@ void STB_TuneStartTuner(U8BIT path, U32BIT freq, U32BIT srate, E_STB_TUNE_FEC fe
       if (index != NO_SOURCE)
       {
          source = &sources[index];
-         if (source->kind != SOURCE_KIND_TS)
-         {
-            printf("NippApp: tuner %u: %u MHz %c is a PCAP source; PCAP input is not supported yet\n",
-               path, source->freq_mhz, source->horizontal ? 'H' : 'V');
-         }
-         else if (OpenTS(tuner, source))
+         if ((source->kind == SOURCE_KIND_TS) ? OpenTS(tuner, source) : OpenPcap(tuner, source))
          {
             tuner->source = index;
             tuner->stop = FALSE;
+            tuner->naci_seen = FALSE;
             ResetPacing(&tuner->pacing);
             if (pthread_create(&tuner->thread, NULL, FeederThread, tuner) == 0)
             {
                tuner->thread_running = TRUE;
                locked = TRUE;
-               printf("NippApp: tuner %u: %u MHz %c %u ksym/s -> %s\n", path, source->freq_mhz,
-                  source->horizontal ? 'H' : 'V', source->symbol_rate, source->file);
+               printf("NippApp: tuner %u: %u MHz %c %u ksym/s -> %s (%s)\n", path, source->freq_mhz,
+                  source->horizontal ? 'H' : 'V', source->symbol_rate, source->file,
+                  (source->kind == SOURCE_KIND_TS) ? "TS" : "PCAP as GSE");
             }
             else
             {
@@ -287,6 +329,13 @@ void STB_TuneStartTuner(U8BIT path, U32BIT freq, U32BIT srate, E_STB_TUNE_FEC fe
             }
          }
       }
+   }
+
+   if (index == NO_SOURCE)
+   {
+      printf("NippApp: tuner %u: no source for %u MHz %c %u ksym/s\n", path,
+         (tuner->if_khz + (tuner->tone_22k ? LO_HIGH_BAND_KHZ : LO_LOW_BAND_KHZ)) / 1000,
+         (tuner->voltage == LNB_VOLTAGE_18V) ? 'H' : 'V', tuner->srate / 1000);
    }
 
    tuner->locked = locked;
@@ -364,8 +413,11 @@ void STB_TuneSetGSEDataCallback(U8BIT path, void *user_data, GSE_PacketCallback 
 {
    if (path < num_paths)
    {
+      /* Waits for a call in progress: DVBCore frees the old user data once this returns */
+      pthread_mutex_lock(&tuners[path].gse_mutex);
       tuners[path].gse_callback = callback;
       tuners[path].gse_user_data = user_data;
+      pthread_mutex_unlock(&tuners[path].gse_mutex);
    }
 }
 
@@ -720,6 +772,60 @@ static BOOLEAN OpenTS(S_TUNER *tuner, const S_SOURCE *source)
    return FALSE;
 }
 
+/* Opens a PCAP file (classic format, not pcapng) and checks its header */
+static BOOLEAN OpenPcap(S_TUNER *tuner, const S_SOURCE *source)
+{
+   U8BIT header[PCAP_HEADER_SIZE];
+   U32BIT magic;
+
+   tuner->file = fopen(source->file, "rb");
+   if (tuner->file == NULL)
+   {
+      fprintf(stderr, "NippApp: tuner %u: cannot open %s: %s\n", tuner->path, source->file,
+         strerror(errno));
+      return FALSE;
+   }
+
+   if (fread(header, 1, sizeof(header), tuner->file) == sizeof(header))
+   {
+      /* The magic number, read big-endian, gives the byte order and timestamp resolution */
+      magic = ((U32BIT)header[0] << 24) | ((U32BIT)header[1] << 16) | ((U32BIT)header[2] << 8) | header[3];
+      tuner->pcap_swapped = TRUE;
+      switch (magic)
+      {
+         case 0xa1b2c3d4:
+            tuner->pcap_swapped = FALSE;
+            /* Fallthrough */
+         case 0xd4c3b2a1:
+            tuner->pcap_nano = FALSE;
+            break;
+         case 0xa1b23c4d:
+            tuner->pcap_swapped = FALSE;
+            /* Fallthrough */
+         case 0x4d3cb2a1:
+            tuner->pcap_nano = TRUE;
+            break;
+         default:
+            magic = 0;
+            break;
+      }
+
+      tuner->pcap_linktype = PcapU32(tuner, header + 20);
+      if ((magic != 0) && ((tuner->pcap_linktype == LINKTYPE_ETHERNET) ||
+          (tuner->pcap_linktype == LINKTYPE_RAW) || (tuner->pcap_linktype == LINKTYPE_LINUX_SLL)))
+      {
+         tuner->sync_offset = PCAP_HEADER_SIZE;
+         return TRUE;
+      }
+   }
+
+   fprintf(stderr, "NippApp: tuner %u: %s is not a PCAP of Ethernet, raw IP or Linux cooked frames\n",
+      tuner->path, source->file);
+   fclose(tuner->file);
+   tuner->file = NULL;
+   return FALSE;
+}
+
 /* Called with the tuner's mutex held */
 static void StopFeeder(S_TUNER *tuner)
 {
@@ -741,42 +847,61 @@ static void* FeederThread(void *param)
 {
    S_TUNER *tuner = (S_TUNER *)param;
    const S_SOURCE *source = &sources[tuner->source];
+
+   if (source->kind == SOURCE_KIND_TS)
+   {
+      FeedTS(tuner, source);
+   }
+   else
+   {
+      FeedPcap(tuner, source);
+   }
+
+   return NULL;
+}
+
+/* At the end of the file a "loop" source starts again; a "stop" source waits until the tuner is
+ * stopped or retuned. Returns TRUE if feeding goes on. */
+static BOOLEAN EndOfFile(S_TUNER *tuner, const S_SOURCE *source)
+{
+   if (source->loop)
+   {
+      fseek(tuner->file, tuner->sync_offset, SEEK_SET);
+      ResetPacing(&tuner->pacing);
+      return TRUE;
+   }
+
+   printf("NippApp: tuner %u: end of %s\n", tuner->path, source->file);
+   while (!tuner->stop)
+   {
+      STB_OSTaskDelay(100);
+   }
+   return FALSE;
+}
+
+static void FeedTS(S_TUNER *tuner, const S_SOURCE *source)
+{
    U8BIT *buffer;
    size_t num;
    U32BIT count;
    U32BIT i;
    U32BIT start;
-   BOOLEAN at_end;
 
    buffer = (U8BIT *)malloc(READ_PACKETS * TS_PACKET_SIZE);
    if (buffer == NULL)
    {
-      return NULL;
+      return;
    }
 
-   at_end = FALSE;
    while (!tuner->stop)
    {
-      if (at_end)
-      {
-         /* Hold at the end of a "stop" source until the tuner is stopped or retuned */
-         STB_OSTaskDelay(100);
-         continue;
-      }
-
       num = fread(buffer, 1, READ_PACKETS * TS_PACKET_SIZE, tuner->file);
       count = (U32BIT)(num / TS_PACKET_SIZE);
       if (count == 0)
       {
-         if (source->loop)
+         if (!EndOfFile(tuner, source))
          {
-            fseek(tuner->file, tuner->sync_offset, SEEK_SET);
-            ResetPacing(&tuner->pacing);
-         }
-         else
-         {
-            printf("NippApp: tuner %u: end of %s\n", tuner->path, source->file);
-            at_end = TRUE;
+            break;
          }
          continue;
       }
@@ -811,7 +936,230 @@ static void* FeederThread(void *param)
    }
 
    free(buffer);
-   return NULL;
+}
+
+static void FeedPcap(S_TUNER *tuner, const S_SOURCE *source)
+{
+   U8BIT record[PCAP_RECORD_SIZE];
+   U8BIT *data;
+   U8BIT *gse;
+   U32BIT len;
+   U8BIT *ip;
+   U16BIT ip_len;
+   U16BIT protocol;
+   double timestamp;
+
+   data = (U8BIT *)malloc(PCAP_MAX_RECORD);
+   gse = (U8BIT *)malloc(GSE_HEADER_SIZE + GSE_MAX_PDU);
+   if ((data == NULL) || (gse == NULL))
+   {
+      free(data);
+      free(gse);
+      return;
+   }
+
+   while (!tuner->stop)
+   {
+      /* Record header: seconds, micro- or nanoseconds, captured length, original length */
+      if ((fread(record, 1, sizeof(record), tuner->file) != sizeof(record)) ||
+          ((len = PcapU32(tuner, record + 8)) > PCAP_MAX_RECORD) ||
+          (fread(data, 1, len, tuner->file) != len))
+      {
+         /* The end of the file, or a truncated or corrupt record */
+         if (!EndOfFile(tuner, source))
+         {
+            break;
+         }
+         continue;
+      }
+
+      timestamp = PcapU32(tuner, record) +
+         (PcapU32(tuner, record + 4) / (tuner->pcap_nano ? 1e9 : 1e6));
+      PaceToStreamTime(&tuner->pacing, timestamp);
+
+      if (GetIpPacket(tuner->pcap_linktype, data, len, &ip, &ip_len, &protocol))
+      {
+         if (!tuner->naci_seen && (protocol == ETHERTYPE_IPV4))
+         {
+            CheckNaci(tuner, ip, ip_len);
+         }
+         DeliverGse(tuner, gse, ip, ip_len, protocol);
+      }
+   }
+
+   free(data);
+   free(gse);
+}
+
+/* A 32-bit field of the PCAP file, in the file's byte order */
+static U32BIT PcapU32(S_TUNER *tuner, const U8BIT *data)
+{
+   if (tuner->pcap_swapped)
+   {
+      return ((U32BIT)data[3] << 24) | ((U32BIT)data[2] << 16) | ((U32BIT)data[1] << 8) | data[0];
+   }
+   return ((U32BIT)data[0] << 24) | ((U32BIT)data[1] << 16) | ((U32BIT)data[2] << 8) | data[3];
+}
+
+/* Finds the IP packet in a captured frame. Its length is taken from the IP header, so that
+ * Ethernet padding is not passed on. */
+static BOOLEAN GetIpPacket(U32BIT linktype, U8BIT *data, U32BIT len, U8BIT **ip, U16BIT *ip_len,
+   U16BIT *protocol)
+{
+   U32BIT offset;
+   U16BIT type;
+   U32BIT length;
+
+   switch (linktype)
+   {
+      case LINKTYPE_ETHERNET:
+         if (len < 14)
+         {
+            return FALSE;
+         }
+         type = (data[12] << 8) | data[13];
+         offset = 14;
+         if ((type == ETHERTYPE_VLAN) && (len >= 18))
+         {
+            type = (data[16] << 8) | data[17];
+            offset = 18;
+         }
+         break;
+      case LINKTYPE_LINUX_SLL:
+         if (len < 16)
+         {
+            return FALSE;
+         }
+         type = (data[14] << 8) | data[15];
+         offset = 16;
+         break;
+      case LINKTYPE_RAW:
+      default:
+         if (len < 1)
+         {
+            return FALSE;
+         }
+         type = ((data[0] >> 4) == 6) ? ETHERTYPE_IPV6 : ETHERTYPE_IPV4;
+         offset = 0;
+         break;
+   }
+
+   if ((type == ETHERTYPE_IPV4) && (len >= offset + 20) && ((data[offset] >> 4) == 4))
+   {
+      length = (data[offset + 2] << 8) | data[offset + 3];
+   }
+   else if ((type == ETHERTYPE_IPV6) && (len >= offset + 40) && ((data[offset] >> 4) == 6))
+   {
+      length = 40 + ((data[offset + 4] << 8) | data[offset + 5]);
+   }
+   else
+   {
+      return FALSE;
+   }
+
+   /* A truncated capture, or a packet too big for one GSE packet, is dropped */
+   if ((length > len - offset) || (length > GSE_MAX_PDU))
+   {
+      return FALSE;
+   }
+
+   *ip = data + offset;
+   *ip_len = (U16BIT)length;
+   *protocol = type;
+   return TRUE;
+}
+
+/* Logs the NIP Actual Carrier Information, the first time it is seen after a tune */
+static void CheckNaci(S_TUNER *tuner, const U8BIT *ip, U16BIT ip_len)
+{
+   const U8BIT *lct;
+   U16BIT ip_header_len;
+   U16BIT lct_len;
+   U16BIT header_len;
+   U16BIT offset;
+   U32BIT tsi;
+   U8BIT cci_len;
+   U8BIT tsi_len;
+   U8BIT toi_len;
+   U16BIT hel;
+   const U8BIT *ext;
+   U8BIT name_len;
+
+   /* UDP to 224.0.23.14:3937 */
+   ip_header_len = (ip[0] & 0x0f) * 4;
+   if ((ip[9] != 17) || (ip_len < ip_header_len + 8 + 4) ||
+       ((((U32BIT)ip[16] << 24) | ((U32BIT)ip[17] << 16) | ((U32BIT)ip[18] << 8) | ip[19]) != NACI_ADDRESS) ||
+       (((ip[ip_header_len + 2] << 8) | ip[ip_header_len + 3]) != NACI_PORT))
+   {
+      return;
+   }
+   lct = ip + ip_header_len + 8;
+   lct_len = ip_len - ip_header_len - 8;
+
+   /* LCT header (RFC 5651): fixed part, CCI, TSI, TOI, then header extensions */
+   header_len = lct[2] * 4;
+   cci_len = 4 * (((lct[0] >> 2) & 0x3) + 1);
+   tsi_len = (4 * ((lct[1] >> 7) & 0x1)) + (2 * ((lct[1] >> 4) & 0x1));
+   toi_len = (4 * ((lct[1] >> 5) & 0x3)) + (2 * ((lct[1] >> 4) & 0x1));
+   if ((header_len > lct_len) || (4 + cci_len + tsi_len + toi_len > header_len))
+   {
+      return;
+   }
+   tsi = 0;
+   for (offset = 0; offset < tsi_len; offset++)
+   {
+      tsi = (tsi << 8) | lct[4 + cci_len + offset];
+   }
+   if (tsi != NACI_TSI)
+   {
+      return;
+   }
+
+   for (offset = 4 + cci_len + tsi_len + toi_len; offset + 2 <= header_len; offset += hel)
+   {
+      /* Extensions 128-255 are one word; the others give their length in words */
+      hel = (lct[offset] >= 128) ? 4 : (lct[offset + 1] * 4);
+      if ((hel == 0) || (offset + hel > header_len))
+      {
+         return;
+      }
+      if ((lct[offset] == NACI_HET) && (hel >= 12))
+      {
+         /* HET, HEL, network, carrier, link, service, reserved, name length, name */
+         ext = lct + offset;
+         name_len = ext[11];
+         if (12 + name_len > hel)
+         {
+            name_len = hel - 12;
+         }
+         printf("NippApp: tuner %u: carrier is NIP network %u, carrier %u, link %u, service %u, provider '%.*s'\n",
+            tuner->path, (ext[2] << 8) | ext[3], (ext[4] << 8) | ext[5], (ext[6] << 8) | ext[7],
+            (ext[8] << 8) | ext[9], name_len, (const char *)(ext + 12));
+         tuner->naci_seen = TRUE;
+         return;
+      }
+   }
+}
+
+/* Wraps an IP packet in one GSE packet and passes it to DVBCore, if it is listening */
+static void DeliverGse(S_TUNER *tuner, U8BIT *gse, const U8BIT *ip, U16BIT ip_len, U16BIT protocol)
+{
+   U16BIT gse_length;
+
+   /* The GSE length counts the bytes after the first two: the protocol type and the PDU */
+   gse_length = 2 + ip_len;
+   gse[0] = GSE_FLAGS_NO_LABEL | ((gse_length >> 8) & 0x0f);
+   gse[1] = gse_length & 0xff;
+   gse[2] = (protocol >> 8) & 0xff;
+   gse[3] = protocol & 0xff;
+   memcpy(gse + GSE_HEADER_SIZE, ip, ip_len);
+
+   pthread_mutex_lock(&tuner->gse_mutex);
+   if (tuner->gse_callback != NULL)
+   {
+      tuner->gse_callback(tuner->gse_user_data, gse, (U16BIT)(GSE_HEADER_SIZE + ip_len));
+   }
+   pthread_mutex_unlock(&tuner->gse_mutex);
 }
 
 static double MonotonicNow(void)

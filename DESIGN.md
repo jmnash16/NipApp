@@ -256,7 +256,13 @@ arrive ("stream initialised", then nothing).
 
 With recordings, two carriers from different recordings have different
 times, so while both are tuned the clock follows whichever sent EXT_TIME last.
-That can't happen with live reception.
+That can't happen with live reception, so the gateway keeps one clock (decided
+2026-10-13). When testing with captures, use one capture at a time, or
+captures with the same clock. For example, Inverto's `1097000.ts` runs at
+about 10:46 and Eutelsat's `1087000.ts` at about 10:33. While VandVA1's
+carrier is still tuned (30-60 s after its last request), `/time` gives
+Eutelsat's time, and VandVA2 stops at "stream initialised", asking for
+segments 13 minutes old.
 
 ## Player
 
@@ -299,7 +305,7 @@ mDNS; they load the player from the gateway.
 | 1 | Skeleton | NippApp builds and links against `libdvbcore.a`, starts and stops cleanly, creates the database |
 | 2 | TS input + MPE search | a search on `1097000.ts` puts A2/B2 in the database with names, LCNs and stable IDs; a rescan creates no duplicates |
 | 3 | PCAP input + GSE search | a search on the SES PCAP finds B1/B2/C1 over the GSE path |
-| 4 | HTTP, registry, player | the player starts from the broadcast entry points served by NippApp, loads a broadcast list and plays DASH and HLS; tuning happens on request and is released when idle |
+| 4 | HTTP, registry, player | the player starts from the broadcast entry points served by NippApp, loads a broadcast list and plays DASH, and HLS when the list signals it; tuning happens on request and is released when idle |
 | 5 | Robustness | two carriers at once, tuner contention, metadata version change updates the list, AddressSanitizer clean |
 | B | DVB-I endpoint | entry point queries, mDNS, content guide (service guide and content guide), works with an independent DVB-I client |
 
@@ -430,13 +436,15 @@ Still to do:
   when it is replaced. The DVB-I list gives the channels' names and LCNs; with
   two lists (Inverto's `main_service_list.xml` and Eutelsat's), whichever came
   last names the channels. SIFs are kept per provider.
-- `nip_xml.c` takes any IdentifierBasedDeliveryParameters URI as a service's
-  HLS instance without checking its content type.
 - HLS: DVB-I has no standard HLS delivery for NIP (DASH is the only mandatory
-  format, 9.1; NIP services use DASHDeliveryParameters, 8.3.3.2). To decide:
-  keep the player's HLS button as a labelled extension or hide it when DASH
-  exists, and whether milestone 4's criterion becomes "DASH; HLS where
-  signalled".
+  format, 9.1; NIP services use DASHDeliveryParameters, 8.3.3.2). Decided
+  2026-10-13: the player keeps its HLS button, shown beside DASH whenever the
+  list signals an HLS instance, and milestone 4's criterion is "plays DASH,
+  and HLS when the list signals it". `nip_xml.c` now takes an
+  IdentifierBasedDeliveryParameters instance as HLS only when its
+  `contentType` is `application/vnd.apple.mpegurl` (or
+  `application/x-mpegURL`); others are skipped. Every HLS instance in the
+  captures has that type.
 - VandVD1 (DVB-HB) and OTT instances can't be played through the gateway.
 - Entry point query filtering, and the move to civetweb.
 
@@ -448,7 +456,8 @@ clock, scan waits for the entry points and a DVB-I list, `ACTL_TuneOff`).
 
 Not committed yet: in DVBCore the SIF merge (`dvbnip/src/nip_mgr.c`,
 `dvbnip/src/nip_xml.c`, `dvbnip/src/nip_xml.h`) and MPE tuning after a restart
-(`dvbnip/src/nip_task.c`, `dvbnip/src/nip_task.h`); this file.
+(`dvbnip/src/nip_task.c`, `dvbnip/src/nip_task.h`), and the HLS content type
+check (`dvbnip/src/nip_xml.c`); this file.
 `dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace` are
 local files, not to be committed.
 
@@ -462,4 +471,4 @@ To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:
 then `./build/nippapp -d <dir> -s <file> --scan` and open
 `http://<ip>:8080/player/`.
 
-Next: the decisions on HLS and `nip_xml.c` above, then milestone 5.
+Next: milestone 5.

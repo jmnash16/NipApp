@@ -65,4 +65,33 @@ BOOLEAN HTTPD_Start(const char *port);
  */
 void HTTPD_Stop(void);
 
+/**
+ * @brief   Starts the registry: from now on, every DVB-I document the NIP library receives is
+ *          kept on disk, under registry/ in the working directory
+ * @return  TRUE if started
+ */
+BOOLEAN REG_Init(void);
+
+/**
+ * @brief   Stops keeping DVB-I documents
+ */
+void REG_Stop(void);
+
+/**
+ * @brief   Whether a media type is one the registry keeps (DVB-I service list entry points,
+ *          service lists, playlists), ignoring case and parameters
+ * @param   filetype media type, may be NULL
+ */
+BOOLEAN REG_IsDvbiType(const char *filetype);
+
+/**
+ * @brief   Reads the registry's copy of a DVB-I document
+ * @param   location broadcast path (/ses.com/dvbi/list.xml), URL or URN of the document
+ * @param   data returns the document, zero-terminated, to be freed with free()
+ * @param   len returns the length of the document
+ * @param   filetype returns its media type, to be freed with free()
+ * @return  TRUE if the registry has the document
+ */
+BOOLEAN REG_Load(const char *location, U8BIT **data, U32BIT *len, char **filetype);
+
 #endif /* _NIPPAPP_H */

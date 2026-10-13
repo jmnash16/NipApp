@@ -181,7 +181,7 @@ int main(int argc, char *argv[])
    printf("NippApp: DVBCore initialised, %u services in the database\n",
       (unsigned)ADB_GetNumServicesInList(ADB_SERVICE_LIST_ALL, FALSE));
 
-   if (!NIPPAPP_SetupCountry(country))
+   if (!NIPPAPP_SetupCountry(country) || !REG_Init())
    {
       return 1;
    }
@@ -205,6 +205,7 @@ int main(int argc, char *argv[])
    }
 
    HTTPD_Stop();
+   REG_Stop();
 
    printf("NippApp: signal %d, shutting down\n", (int)stop_signal);
 

@@ -20,6 +20,7 @@ SRCS = src/main.c \
        src/search.c \
        src/events.c \
        src/httpd.c \
+       src/registry.c \
        platform/os/stbos_event.c \
        platform/os/stbos_mutex.c \
        platform/os/stbos_queue.c \

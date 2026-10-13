@@ -1,1 +1,6 @@
 build/
+# working files when run without -d
+dtvkit.sqlite3
+nvm.dat
+disks/
+registry/

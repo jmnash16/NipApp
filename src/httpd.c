@@ -19,7 +19,8 @@
  *            demand; it stops when its files are no longer requested (the NIP library's logic).
  *          - A file not received yet is waited for, then 404 (clause 8.5.3).
  *          - DVB-I service lists and entry points have http://dvb.gw/ replaced by this server's
- *            address (Annex F.2.1).
+ *            address (Annex F.2.1). When the NIP library doesn't have one (its carrier isn't
+ *            tuned), the copy kept by the registry is served.
  *          - MPDs get a UTCTiming pointing at /time and a short update period (clause 9.1.2);
  *            AAC init segments get the plain AudioSpecificConfig some browsers need.
  *          - /time gives the broadcast time (clause 8.6.3).
@@ -73,16 +74,6 @@
 
 static const char application_dash_xml[] = "application/dash+xml";
 static const char dvb_gw_prefix[] = "http://dvb.gw/";
-
-/* Media types whose documents carry dvb.gw URLs for clients (DVB-I service lists, entry points
- * and playlists), compared without any parameters */
-static const char *dvbi_types[] = {
-   "application/vnd.dvb.dvbisl+xml",
-   "application/xml+dvb-i-sl",
-   "application/xml+dvb-i-slep",
-   "application/xml+dvb-i-pl",
-   NULL
-};
 
 /* Extensions of broadcast files worth waiting for */
 static const char *hold_extensions[] = {
@@ -197,26 +188,6 @@ static void GetHost(struct mg_connection *conn, char *host)
       header = default_host;
    }
    strcpy(host, header);
-}
-
-/* Whether a media type is one of a list, ignoring case and parameters ("; charset=utf-8") */
-static BOOLEAN IsMediaType(const char *filetype, const char **types)
-{
-   size_t len;
-
-   if (filetype == NULL)
-   {
-      return FALSE;
-   }
-   len = strcspn(filetype, "; ");
-   for (; *types != NULL; types++)
-   {
-      if ((strlen(*types) == len) && (strncasecmp(filetype, *types, len) == 0))
-      {
-         return TRUE;
-      }
-   }
-   return FALSE;
 }
 
 /************************************************************************
@@ -675,12 +646,20 @@ static void SendFile(struct mg_connection *conn, const char *path)
    U32BIT len;
    U32BIT waited;
    char *body;
+   BOOLEAN from_registry;
 
-   /* A request for a file under a service's directory starts the service, so the file may arrive
-    * shortly: wait for it before answering 404 */
+   /* The NIP library's copy is the latest. Without one, a DVB-I document is served from the
+    * registry; anything else under a service's directory starts the service, so it may arrive
+    * shortly and is waited for before answering 404. */
+   from_registry = FALSE;
    waited = 0;
    while (!DVBNIP_CopyFile((const U8BIT *)path, &data, &len, &filetype))
    {
+      if (REG_Load(path, &data, &len, (char **)&filetype))
+      {
+         from_registry = TRUE;
+         break;
+      }
       if (!WorthWaitingFor(path) || (waited >= HOLD_MS))
       {
          SendNotFound(conn);
@@ -702,7 +681,7 @@ static void SendFile(struct mg_connection *conn, const char *path)
          free(body);
       }
    }
-   else if (IsMediaType((const char *)filetype, dvbi_types))
+   else if (REG_IsDvbiType((const char *)filetype))
    {
       body = RewriteDvbGw(conn, (const char *)data, &len);
       if (body != NULL)
@@ -721,10 +700,18 @@ static void SendFile(struct mg_connection *conn, const char *path)
          NULL, data, len);
    }
 
-   STB_FreeMemory(data);
-   if (filetype != NULL)
+   if (from_registry)
    {
-      STB_FreeMemory(filetype);
+      free(data);
+      free(filetype);
+   }
+   else
+   {
+      STB_FreeMemory(data);
+      if (filetype != NULL)
+      {
+         STB_FreeMemory(filetype);
+      }
    }
 }
 

@@ -93,7 +93,7 @@ NippApp/
     main.c               options, startup, main loop, shutdown
     events.c             DVBCore event handler (logging for now)
     search.c             first-run setup (country, satellite/LNB records) and scans
-    registry.c           local service list registry: entry points, lists, query filtering (milestone 4)
+    registry.c           keeps every DVB-I document received on disk (query filtering: Phase B)
     guide.c              content guide endpoint (Phase 5)
     httpd.c              HTTP server: broadcast files, DVB-I rewriting, /time, /dvbi/slep.xml (milestone 4)
     mdns.c               DNS-SD/mDNS announcement (Phase B)
@@ -182,6 +182,17 @@ is always the broadcast path.
 The gateway's address in rewritten URLs is a literal IP address, not a `.local`
 name: `dvbi-client-js` allows plain HTTP only to private IP addresses and
 localhost.
+
+The registry (`src/registry.c`) keeps a copy of every DVB-I document the NIP
+library receives (entry points, service lists, playlists) under `registry/` in
+the working directory, at its broadcast path; a document identified by URN is
+kept under `registry/urn/`. Its media type is kept beside it. A copy is written
+only when the content changes. The server serves the NIP library's copy when
+it has one, and otherwise the registry's, at once, so the entry points and
+lists are available after a restart and while their carrier isn't tuned
+(8.2.8, C.4.3). A request under a path the SIF lists still starts that
+carrier (9.5.4), so a list served from the registry is also refreshed from
+the broadcast.
 
 When the broadcast has no DVB-I list (TP37, 1067000.ts; not conformant),
 NippApp generates an entry points file and a list from the SIF and the
@@ -300,6 +311,9 @@ our captures use FLUTE with Content-Encoding null.
 
 Done so far:
 
+- The registry keeps every DVB-I document received on disk; after a restart
+  `/dvbi/slep.xml` and the lists are served at once, with no tuning.
+
 - The HTTP server (`src/httpd.c`, mongoose 3.8 from the test tool, port `-p`,
   default 8080) serves files at their broadcast paths, waits up to 8 s for
   broadcast files not received yet, rewrites `http://dvb.gw/` in DVB-I
@@ -317,10 +331,12 @@ Done so far:
 
 Still to do:
 
-- Registry: the SLEP and most DVB-I lists are only in the NIP library's memory,
-  so after a restart they are not served until their carrier is tuned. NippApp
-  should keep its own copy of every DVB-I document it receives (the file store
-  callback) and serve that when the store has none.
+- The registry keeps one SLEP, as the NIP library does: each network's SLEP has
+  the same URN, so the last one received replaces the others. With several
+  networks the registry needs to keep one per network and merge them.
+- A file that is neither in the store nor the registry is waited for, then
+  404, even when no SIF lists its path. Answering 404 at once for paths the SIF
+  doesn't list (8.5.3) needs a lookup the NIP library doesn't offer yet.
 - One network at a time: the NIP library keeps one SIF, NIF and SLEP (they have
   fixed Content-Locations), so after searching Inverto and SES only SES's
   services can be tuned on demand. Serving more than one network needs the NIP

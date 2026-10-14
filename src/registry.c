@@ -21,8 +21,11 @@
  *          some headends send instead of a dvb.gw URL) is taken as a path from the root. Its media
  *          type is kept beside it, in a file with TYPE_SUFFIX added to the name.
  *
- *          The entry points are also kept under SLEP_LOCATION, whatever location they were sent
- *          with, so that the gateway always has one to serve.
+ *          Each network's entry points are also kept under registry/slep/, named after their
+ *          registry entity, whatever location they were sent with. The gateway's entry points
+ *          (SLEP_LOCATION, clause 8.1.7.3) are made from them: one network's as they are; with
+ *          several, the first (by name) with every other one's provider offerings added, so a
+ *          client is offered every network's service lists.
  * @file    registry.c
  */
 
@@ -33,8 +36,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
+#include <libxml/parser.h>
+#include <libxml/tree.h>
 
 /* STB header files */
 #include "techtype.h"
@@ -48,6 +55,9 @@
 /*---constant definitions for this file---------------------------------------*/
 #define REGISTRY_DIR          "registry"
 #define URN_DIR               "urn"
+#define SLEP_DIR              REGISTRY_DIR "/slep"
+#define MAX_ENTITY_NAME       100
+#define MAX_SLEPS             32
 #define TYPE_SUFFIX           ".nippapp-type"
 #define MAX_PATH_LEN          1024
 #define MAX_TYPE_LEN          256
@@ -77,14 +87,19 @@ static BOOLEAN MakeParentDirs(char *filename);
 static BOOLEAN SameContent(const char *filename, const U8BIT *data, U32BIT len);
 static BOOLEAN WriteFileAtomically(const char *filename, const void *data, U32BIT len);
 static U8BIT* ReadWholeFile(const char *filename, U32BIT *len);
+static void KeepEntryPoints(const U8BIT *data, U32BIT len);
+static BOOLEAN EntityFileName(const U8BIT *data, U32BIT len, char *filename, size_t size);
+static BOOLEAN LoadEntryPoints(U8BIT **data, U32BIT *len, char **filetype);
+static int CompareNames(const void *a, const void *b);
 
 /*---global function definitions---------------------------------------------*/
 
 BOOLEAN REG_Init(void)
 {
-   if ((mkdir(REGISTRY_DIR, 0755) != 0) && (errno != EEXIST))
+   if (((mkdir(REGISTRY_DIR, 0755) != 0) && (errno != EEXIST)) ||
+       ((mkdir(SLEP_DIR, 0755) != 0) && (errno != EEXIST)))
    {
-      fprintf(stderr, "NippApp: cannot create %s: %s\n", REGISTRY_DIR, strerror(errno));
+      fprintf(stderr, "NippApp: cannot create %s: %s\n", SLEP_DIR, strerror(errno));
       return FALSE;
    }
 
@@ -126,6 +141,12 @@ BOOLEAN REG_Load(const char *location, U8BIT **data, U32BIT *len, char **filetyp
 
    *data = NULL;
    *filetype = NULL;
+
+   /* the gateway's entry points, made from every network's */
+   if ((strcmp(location, SLEP_LOCATION) == 0) && LoadEntryPoints(data, len, filetype))
+   {
+      return TRUE;
+   }
 
    if (!RegistryFile(location, filename, sizeof(filename)))
    {
@@ -177,15 +198,229 @@ static void FileStored(void *user_data, S_FLUTE_FILE *file)
 
    KeepDocument((const char *)file->filename, (const char *)file->filetype, data, len, file->version);
 
-   /* The entry points, whatever location they came with, are also the gateway's entry points */
+   /* The entry points, whatever location they came with, are kept as their network's */
    if ((strncasecmp((const char *)file->filetype, SLEP_TYPE, slep_len) == 0) &&
-       ((file->filetype[slep_len] == '\0') || (file->filetype[slep_len] == ';')) &&
-       (strcmp((const char *)file->filename, SLEP_LOCATION) != 0))
+       ((file->filetype[slep_len] == '\0') || (file->filetype[slep_len] == ';')))
    {
-      KeepDocument(SLEP_LOCATION, (const char *)file->filetype, data, len, file->version);
+      KeepEntryPoints(data, len);
    }
 
    free(data);
+}
+
+/* Keeps a network's entry points under SLEP_DIR, named after their registry entity, so that a new
+ * version replaces the old one and other networks' are kept */
+static void KeepEntryPoints(const U8BIT *data, U32BIT len)
+{
+   char filename[MAX_PATH_LEN];
+
+   if (EntityFileName(data, len, filename, sizeof(filename)) && !SameContent(filename, data, len) &&
+       WriteFileAtomically(filename, data, len))
+   {
+      printf("NippApp: registry: kept the entry points %s\n", filename + strlen(SLEP_DIR) + 1);
+   }
+}
+
+/* The file for entry points: the name of their ServiceListRegistryEntity, or else of their first
+ * Provider, with anything but letters, digits, '-' and '.' made '_' */
+static BOOLEAN EntityFileName(const U8BIT *data, U32BIT len, char *filename, size_t size)
+{
+   xmlDocPtr doc;
+   xmlNodePtr root, node, child;
+   xmlChar *name = NULL;
+   char safe[MAX_ENTITY_NAME + 1];
+   const xmlChar *p;
+   size_t n;
+
+   doc = xmlReadMemory((const char *)data, (int)len, NULL, NULL, XML_PARSE_NONET | XML_PARSE_NOWARNING | XML_PARSE_NOERROR);
+   if (doc == NULL)
+   {
+      return FALSE;
+   }
+   root = xmlDocGetRootElement(doc);
+   for (node = (root == NULL) ? NULL : root->children; (node != NULL) && (name == NULL); node = node->next)
+   {
+      if ((node->type == XML_ELEMENT_NODE) &&
+          ((xmlStrcmp(node->name, BAD_CAST "ServiceListRegistryEntity") == 0) ||
+           (xmlStrcmp(node->name, BAD_CAST "ProviderOffering") == 0)))
+      {
+         /* ProviderOffering holds the name in its Provider */
+         child = node->children;
+         if (xmlStrcmp(node->name, BAD_CAST "ProviderOffering") == 0)
+         {
+            while ((child != NULL) && ((child->type != XML_ELEMENT_NODE) || (xmlStrcmp(child->name, BAD_CAST "Provider") != 0)))
+            {
+               child = child->next;
+            }
+            child = (child == NULL) ? NULL : child->children;
+         }
+         for (; (child != NULL) && (name == NULL); child = child->next)
+         {
+            if ((child->type == XML_ELEMENT_NODE) && (xmlStrcmp(child->name, BAD_CAST "Name") == 0))
+            {
+               name = xmlNodeGetContent(child);
+            }
+         }
+      }
+   }
+   xmlFreeDoc(doc);
+
+   /* letters and digits kept, every run of anything else one '_' */
+   n = 0;
+   for (p = name; (p != NULL) && (*p != '\0') && (n < MAX_ENTITY_NAME); p++)
+   {
+      if (isalnum(*p) || (*p == '-') || (*p == '.'))
+      {
+         safe[n++] = (char)*p;
+      }
+      else if ((n > 0) && (safe[n - 1] != '_'))
+      {
+         safe[n++] = '_';
+      }
+   }
+   while ((n > 0) && (safe[n - 1] == '_'))
+   {
+      n--;
+   }
+   safe[n] = '\0';
+   xmlFree(name);
+
+   if ((n == 0) || (safe[0] == '.'))
+   {
+      return FALSE;
+   }
+   return (snprintf(filename, size, "%s/%s.xml", SLEP_DIR, safe) < (int)size);
+}
+
+static int CompareNames(const void *a, const void *b)
+{
+   return strcmp(*(char * const *)a, *(char * const *)b);
+}
+
+/* The gateway's entry points, made from every network's kept under SLEP_DIR: one network's as they
+ * are; with several, the first by name with the provider offerings of the others added. The
+ * offerings keep their own namespace, which may be an older or newer schema version than the
+ * first network's. */
+static BOOLEAN LoadEntryPoints(U8BIT **data, U32BIT *len, char **filetype)
+{
+   DIR *dir;
+   struct dirent *entry;
+   char *names[MAX_SLEPS];
+   char filename[MAX_PATH_LEN];
+   int count, i;
+   size_t name_len;
+   xmlDocPtr base, doc;
+   xmlNodePtr root, node, copy;
+   xmlChar *merged;
+   int merged_len;
+   U8BIT *content;
+   U32BIT content_len;
+
+   dir = opendir(SLEP_DIR);
+   if (dir == NULL)
+   {
+      return FALSE;
+   }
+   count = 0;
+   while (((entry = readdir(dir)) != NULL) && (count < MAX_SLEPS))
+   {
+      name_len = strlen(entry->d_name);
+      if ((entry->d_name[0] != '.') && (name_len > 4) && (strcmp(entry->d_name + name_len - 4, ".xml") == 0))
+      {
+         names[count] = strdup(entry->d_name);
+         if (names[count] != NULL)
+         {
+            count++;
+         }
+      }
+   }
+   closedir(dir);
+   if (count == 0)
+   {
+      return FALSE;
+   }
+   qsort(names, count, sizeof(names[0]), CompareNames);
+
+   base = NULL;
+   root = NULL;
+   *data = NULL;
+   for (i = 0; i < count; i++)
+   {
+      snprintf(filename, sizeof(filename), "%s/%s", SLEP_DIR, names[i]);
+      content = ReadWholeFile(filename, &content_len);
+      if (content == NULL)
+      {
+         continue;
+      }
+      if (count == 1)
+      {
+         /* one network: as it was broadcast */
+         *data = content;
+         *len = content_len;
+         break;
+      }
+      doc = xmlReadMemory((const char *)content, (int)content_len, NULL, NULL,
+         XML_PARSE_NONET | XML_PARSE_NOWARNING | XML_PARSE_NOERROR);
+      free(content);
+      if (doc == NULL)
+      {
+         continue;
+      }
+      if (base == NULL)
+      {
+         base = doc;
+         root = xmlDocGetRootElement(base);
+         continue;
+      }
+      for (node = xmlDocGetRootElement(doc)->children; (node != NULL) && (root != NULL); node = node->next)
+      {
+         if ((node->type == XML_ELEMENT_NODE) && (xmlStrcmp(node->name, BAD_CAST "ProviderOffering") == 0))
+         {
+            copy = xmlDocCopyNode(node, base, 1);
+            if (copy != NULL)
+            {
+               xmlAddChild(root, copy);
+            }
+         }
+      }
+      xmlFreeDoc(doc);
+   }
+
+   if (base != NULL)
+   {
+      merged = NULL;
+      xmlDocDumpMemoryEnc(base, &merged, &merged_len, "UTF-8");
+      if (merged != NULL)
+      {
+         *data = (U8BIT *)malloc(merged_len + 1);
+         if (*data != NULL)
+         {
+            memcpy(*data, merged, merged_len);
+            (*data)[merged_len] = '\0';
+            *len = (U32BIT)merged_len;
+         }
+         xmlFree(merged);
+      }
+      xmlFreeDoc(base);
+   }
+
+   for (i = 0; i < count; i++)
+   {
+      free(names[i]);
+   }
+
+   if (*data == NULL)
+   {
+      return FALSE;
+   }
+   *filetype = strdup(SLEP_TYPE);
+   if (*filetype == NULL)
+   {
+      free(*data);
+      *data = NULL;
+      return FALSE;
+   }
+   return TRUE;
 }
 
 /* Writes a document to the registry if its content has changed */

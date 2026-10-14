@@ -47,7 +47,8 @@ INCLUDES = inc \
            $(DVBCORE_ROOT)/platform/inc \
            $(DVBCORE_ROOT)/midware/stb/inc \
            $(DVBCORE_ROOT)/dvb/inc \
-           $(DVBCORE_ROOT)/dvbnip/inc
+           $(DVBCORE_ROOT)/dvbnip/inc \
+           /usr/include/libxml2
 
 # Must match the DVBCore build so that shared structures have the same layout
 DEFINES = OSD_32_BIT COLOUR_DEPTH=32 DVBNIP_BUILD _FILE_OFFSET_BITS=64

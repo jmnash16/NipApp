@@ -177,7 +177,7 @@ is always the broadcast path.
 | broadcast path of each DVB-I list | the list as broadcast, with `http://dvb.gw/` changed to the gateway's address (Annex F.2.1) |
 | broadcast path of the content guide manifest | the content guide endpoint: `?sid&start&end`, `?sid&now_next=true` (Annex D.6.2; Phase 5) |
 | any other broadcast path | manifests, segments and other files from the file store |
-| `/dvbi/slep.xml` | the DVB-I service list entry points, which the broadcast identifies only by URN (`urn:dvb:metadata:nativeip:dvb-i-slep`, 8.2.5.1), so the gateway chooses the URL (8.1.7.3) |
+| `/dvbi/slep.xml` | the DVB-I service list entry points, which the broadcast identifies only by URN (`urn:dvb:metadata:nativeip:dvb-i-slep`, 8.2.5.1), so the gateway chooses the URL (8.1.7.3); with several networks, one document offering every network's lists |
 | `/time` | the NIP wall clock (8.6.3) |
 | `/api/status`, `/api/scan` | admin only: sources, tuners, sessions, store usage; start a rescan. The player never uses these. |
 
@@ -189,7 +189,17 @@ The registry (`src/registry.c`) keeps a copy of every DVB-I document the NIP
 library receives (entry points, service lists, playlists) under `registry/` in
 the working directory, at its broadcast path; a document identified by URN is
 kept under `registry/urn/`. Its media type is kept beside it. A copy is written
-only when the content changes. The server serves the NIP library's copy when
+only when the content changes.
+
+Each network's entry points are also kept under `registry/slep/`, named after
+their registry entity (`EUTELSAT_DVB-NIP.xml`, `SES_DVB-NIP.xml`), whatever
+location they came with, so a new version replaces the old one and other
+networks' are kept. `/dvbi/slep.xml` serves one network's entry points as
+broadcast; with several, the first by name with every other one's
+`ProviderOffering` elements added. Copied offerings keep their own namespace,
+which can be an older or newer schema version than the first document's
+(Eutelsat's are 2023, SES's 2024); dvbi-client-js ignores namespaces, and a
+namespace-aware client sees each offering in its own schema. The server serves the NIP library's copy when
 it has one, and otherwise the registry's, at once, so the entry points and
 lists are available after a restart and while their carrier isn't tuned
 (8.2.8, C.4.3). A request under a path the SIF lists still starts that
@@ -437,19 +447,14 @@ Done later (2026-10-13):
 
 Still to do:
 
-- The registry keeps one SLEP, as the NIP library does: each network's SLEP has
-  the same URN, so the last one received replaces the others. With several
-  networks the registry needs to keep one per network and merge them.
 - A file that is neither in the store nor the registry is waited for, then
   404, even when no SIF lists its path. Answering 404 at once for paths the SIF
   doesn't list (8.5.3) needs a lookup the NIP library doesn't offer yet.
-- One DVB-I list and one NIF: the NIP library still keeps the last one
-  received. The NIF only adds transports to the database, so nothing is lost
-  when it is replaced. The DVB-I list gives the channels' names and LCNs; with
-  two lists (Inverto's `main_service_list.xml` and Eutelsat's), whichever came
-  last names the channels. SIFs are kept per provider. With Inverto,
-  Eutelsat and SES searched together, SES's list came last: VandVA2 is named
-  "A2", and Inverto's B2 and SES's B2 both get LCN 2.
+- One NIF: the NIP library keeps the last one received. It only adds
+  transports to the database, so nothing is lost when it is replaced.
+- SES's "DVB-NIP Offline Content" list (`/ses.com/private/dvbi/...`) is in its
+  SIF and entry points but doesn't arrive within the 8 s wait, so it answers
+  404.
 - After a tuner is released, the first request for a service's manifest is
   answered at once with the stored copy while the carrier is tuned again. Not
   yet checked in a browser.
@@ -498,17 +503,44 @@ Metadata version change:
   database leaked its name (`name_str`); found by AddressSanitizer here, which
   is now clean.
 
+Several networks and lists:
+
+- NippApp keeps each network's entry points and serves them merged (see
+  Serving). With Inverto, Eutelsat and SES searched, `/dvbi/slep.xml` offers
+  Inverto's "Airstream Main List", Eutelsat's list and SES's three, and
+  dvbi-client-js loads each (2, 7, 6 and 3 services; SES's offline content
+  list is 404, above).
+- DVBCore keeps every DVB-I list, by its location, as `dvbisl.xml`,
+  `dvbisl1.xml`, ... with the location beside each (`dvbisl.loc`, ...); a list
+  saved before this, without a location, isn't used. A service takes its name,
+  identifier and LCN from the first list that has it.
+- DVBCore bug fixed: `DVBNIP_PathMatch` ignores a host-like first segment (for
+  TP37's `/10.0.1.229/...`), so SES's `/ses.com/livesim2/B1/Manifest.mpd`
+  also matched Eutelsat's `/livesim2/B1/Manifest.mpd`: SES's B1 and C1 were
+  named after Eutelsat's, a request could find the other network's service or
+  stored file, and a gateway configuration's sessions could be given to the
+  other network's service. Lookups (`FindServiceByURI`, `FindServiceForPath`,
+  `DVBNIP_FindFile`, the list join and `AddMulticasts`) now look for the same
+  path, ignoring case only (`DVBNIP_PathEqual`), before the looser match.
+- Now SES's B1, B2 and C1 keep their names (B1 and B2 at LCNs 1003-1004, as
+  Inverto's A2 and B2 have 1 and 2), each network's B1 tunes its own carrier,
+  and the April to September Eutelsat change still replaces the list and the
+  entry points. AddressSanitizer clean over a three-network search, a restart
+  and the change.
+- The player collapses white space in names (Eutelsat lays them out over
+  several lines).
+
 Still to do for milestone 5: two carriers at once with captures that share a
 clock, and a full AddressSanitizer pass over all of it.
 
 ## Resume here (state at 2026-10-14)
 
-Milestones 1-4 are committed (NippApp 0a325a7, DVBCore 734b47d).
+Milestones 1-4 and milestone 5's tuner contention and metadata change are
+committed (NippApp 3fc6016, DVBCore 9fb3cb4).
 
-Not committed yet (milestone 5 so far): in DVBCore `dvbnip/inc/nip_mgr.h`,
-`dvbnip/src/nip_mgr.c`, `dvbnip/src/nip_task.c`, `dvbnip/src/nip_task.h`,
-`dvb/src/ap_dbdef.c`; in NippApp `src/httpd.c`, `player/player.html` and this
-file. `dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
+Not committed yet (several networks and lists): in DVBCore
+`dvbnip/src/nip_mgr.c`, `dvbnip/src/nip_misc.c`, `dvbnip/src/nip_misc.h`; in
+NippApp `Makefile`, `src/registry.c`, `player/player.html` and this file. `dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
 are local files, not to be committed.
 
 To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:

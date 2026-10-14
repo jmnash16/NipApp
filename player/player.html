@@ -109,9 +109,10 @@ function delivery(instance) {
   return null;
 }
 
+/* Some lists lay out names over several lines (Eutelsat's), so white space is collapsed */
 function textOf(localized) {
-  if (Array.isArray(localized)) return localized.length ? (localized[0].text || '') : '';
-  return localized || '';
+  const text = Array.isArray(localized) ? (localized.length ? (localized[0].text || '') : '') : (localized || '');
+  return String(text).replace(/\s+/g, ' ').trim();
 }
 
 /* ---- DVB-I: entry points, service lists, services ---- */

@@ -21,6 +21,7 @@ SRCS = src/main.c \
        src/events.c \
        src/httpd.c \
        src/registry.c \
+       src/encoding.c \
        platform/os/stbos_event.c \
        platform/os/stbos_mutex.c \
        platform/os/stbos_queue.c \

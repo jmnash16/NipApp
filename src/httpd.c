@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -84,11 +85,6 @@ static const char application_dash_xml[] = "application/dash+xml";
 static const char dvb_gw_prefix[] = "http://dvb.gw/";
 
 /* Extensions of broadcast files worth waiting for */
-static const char *hold_extensions[] = {
-   ".mpd", ".m3u8", ".m4s", ".mp4", ".m4v", ".m4a", ".ts", ".cmfv", ".cmfa", ".vtt", ".ttml", ".xml",
-   NULL
-};
-
 /*---local typedef structs for this file--------------------------------------*/
 typedef struct
 {
@@ -665,26 +661,6 @@ static U32BIT FixAACConfig(U8BIT *data, U32BIT len)
  * Files from the NIP file store
  */
 
-/* Whether a path looks like broadcast content, which may still be on its way */
-static BOOLEAN WorthWaitingFor(const char *path)
-{
-   const char *ext = strrchr(path, '.');
-   const char **e;
-
-   if ((ext == NULL) || (strchr(ext, '/') != NULL))
-   {
-      return FALSE;
-   }
-   for (e = hold_extensions; *e != NULL; e++)
-   {
-      if (strcasecmp(ext, *e) == 0)
-      {
-         return TRUE;
-      }
-   }
-   return FALSE;
-}
-
 /* prefer_registry: serve the registry's copy before the NIP library's. For the entry points,
  * which the registry keeps whatever location they came with, the NIP library may hold an older
  * network's under the URN. */
@@ -692,25 +668,31 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
 {
    U8BIT *data;
    U8BIT *filetype;
+   U8BIT *encoding = NULL;
+   U8BIT *decoded;
+   U32BIT decoded_len;
    U32BIT len;
    U32BIT waited;
    char *body;
+   char encoding_header[64];
    BOOLEAN from_registry;
+   BOOLEAN data_malloced;
 
    /* The NIP library's copy is the latest. Without one, a DVB-I document is served from the
     * registry; anything else under a service's directory starts the service, so it may arrive
     * shortly and is waited for before answering 404. */
    from_registry = prefer_registry && REG_Load(path, &data, &len, (char **)&filetype);
    waited = 0;
-   while (!from_registry && !DVBNIP_CopyFile((const U8BIT *)path, &data, &len, &filetype))
+   while (!from_registry && !DVBNIP_CopyFileEncoded((const U8BIT *)path, &data, &len, &filetype, &encoding))
    {
       if (REG_Load(path, &data, &len, (char **)&filetype))
       {
          from_registry = TRUE;
          break;
       }
-      /* nothing to wait for when no SIF lists the file or its directory (8.5.3) */
-      if (!WorthWaitingFor(path) || (waited >= HOLD_MS) || !DVBNIP_IsPathSignalled((const U8BIT *)path))
+      /* whatever a SIF lists, or a directory it lists, may be on its way (a segment, a carousel's
+       * picture); anything else is answered 404 at once (8.5.3) */
+      if ((waited >= HOLD_MS) || !DVBNIP_IsPathSignalled((const U8BIT *)path))
       {
          SendNotFound(conn);
          return;
@@ -723,6 +705,26 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
       }
       usleep(HOLD_STEP_MS * 1000);
       waited += HOLD_STEP_MS;
+   }
+
+   /* A file sent compressed is served decoded, so DVB-I documents can still be rewritten; one that
+    * doesn't decode is passed on as it is, saying how it is encoded */
+   data_malloced = from_registry;
+   encoding_header[0] = '\0';
+   if (encoding != NULL)
+   {
+      if (ENC_Decode((const char *)encoding, data, len, &decoded, &decoded_len))
+      {
+         STB_FreeMemory(data);
+         data = decoded;
+         len = decoded_len;
+         data_malloced = TRUE;
+      }
+      else if (strlen((const char *)encoding) < 32)
+      {
+         snprintf(encoding_header, sizeof(encoding_header), "Content-Encoding: %s\r\n", (const char *)encoding);
+      }
+      STB_FreeMemory(encoding);
    }
 
    if ((filetype != NULL) && (strncmp((const char *)filetype, application_dash_xml, strlen(application_dash_xml)) == 0))
@@ -753,17 +755,23 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
          len = FixAACConfig(data, len);
       }
       SendResponse(conn, 200, "OK", (filetype == NULL) ? "application/octet-stream" : (const char *)filetype,
-         NULL, data, len);
+         encoding_header, data, len);
    }
 
-   if (from_registry)
+   if (data_malloced)
    {
       free(data);
-      free(filetype);
    }
    else
    {
       STB_FreeMemory(data);
+   }
+   if (from_registry)
+   {
+      free(filetype);
+   }
+   else
+   {
       if (filetype != NULL)
       {
          STB_FreeMemory(filetype);
@@ -835,6 +843,42 @@ static void SendPlayerFile(struct mg_connection *conn, const char *uri)
    fclose(f);
 }
 
+/* The request path as the broadcast names files. mongoose decodes %XX in the path, but the
+ * Content-Locations of broadcast files, SIF entries and DVB-I lists keep the URL encoding
+ * (clause 8.2.8: /ses.com/private/pdf/covers/P.M.%20Magazin.jpg), so the decoded path is encoded
+ * again as RFC 3986 encodes a path: everything but unreserved characters, sub-delimiters, ':', '@'
+ * and '/' as %XX. Returns FALSE if it doesn't fit. */
+static BOOLEAN EncodePath(const char *path, char *encoded, size_t size)
+{
+   static const char hex[] = "0123456789ABCDEF";
+   const unsigned char *p;
+   size_t n = 0;
+
+   for (p = (const unsigned char *)path; *p != '\0'; p++)
+   {
+      if (isalnum(*p) || (strchr("-._~!$&'()*+,;=:@/", *p) != NULL))
+      {
+         if (n + 1 >= size)
+         {
+            return FALSE;
+         }
+         encoded[n++] = (char)*p;
+      }
+      else
+      {
+         if (n + 3 >= size)
+         {
+            return FALSE;
+         }
+         encoded[n++] = '%';
+         encoded[n++] = hex[*p >> 4];
+         encoded[n++] = hex[*p & 15];
+      }
+   }
+   encoded[n] = '\0';
+   return TRUE;
+}
+
 /* Whether a query asks for the DVB-HB function: src=DVB-HB, which DVB-NIP Annex F uses for TS
  * broadcast services that the gateway would tune and re-package as DASH (DVB A179) */
 static BOOLEAN IsDvbHbRequest(const char *query)
@@ -869,6 +913,7 @@ static int BeginRequestHandler(struct mg_connection *conn)
 {
    const struct mg_request_info *request_info = mg_get_request_info(conn);
    const char *uri = request_info->uri;
+   char path[MAX_PATH_LEN * 3];
 
    if ((strcmp(request_info->request_method, "GET") != 0) && (strcmp(request_info->request_method, "HEAD") != 0))
    {
@@ -899,9 +944,13 @@ static int BeginRequestHandler(struct mg_connection *conn)
       printf("NippApp: DVB-HB not supported: %s?%s\n", uri, request_info->query_string);
       SendNoDvbHb(conn);
    }
+   else if (EncodePath(uri, path, sizeof(path)))
+   {
+      SendFile(conn, path, FALSE);
+   }
    else
    {
-      SendFile(conn, uri, FALSE);
+      SendNotFound(conn);
    }
 
    /* Non-zero: the request has been answered */

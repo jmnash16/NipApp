@@ -298,8 +298,29 @@ segment and a margin before starting the player. dash.js takes its clock from
 are the test tool's.
 
 In dvbi-client-js's results a service instance's delivery is in
-`instance.deliveryParameters` (`type` `dash` with `dash.mpdUrl`, or `hls` with
-`other.url`).
+`instance.deliveryParameters` (`type` `dash` with `dash.mpdUrl`, `hls` with
+`other.url`, or `file` with `other.url` and `other.mimeType`).
+
+Offline content: SES's "DVB-NIP Offline Content" list has, besides B1, B2 and
+C1, 12 pictures, 10 videos and 11 PDFs from its object carousels, each an
+`IdentifierBasedDeliveryParameters` instance whose identifier is the file's
+URL and whose `contentType` is its MIME type, with a cover as its banner
+(1001.3). dvbi-client-js dropped those instances (it only knew HLS, Icecast
+and MBMS there); it now gives an HTTP(S) URL with a MIME type as delivery
+type `file` (`fileDelivery` in `src/service-list.js`, with a parser test).
+The player shows a file's button by type (Picture, Video, PDF), uses a
+service's banner as its thumbnail when it has no logo, and on choosing one
+requests it until it arrives (404 or 503: tried again every 5 s, or after
+`Retry-After`, for up to three minutes, as a carousel can take a minute or
+more to come round). A picture is shown in place of the video, a video is
+played as a file by the video element, and a PDF is shown in a frame (a new
+tab opened after waiting would be stopped by pop-up blockers). The pictures
+and covers that are complete in the SES capture are shown (a picture after
+up to a minute). The videos (17-291 MB) and PDFs (30-115 MB) can't be
+delivered yet: the capture holds at most 16 MB of each, the file store keeps
+files in memory with limits of 128 MB per service and 256 MB in all, and
+seeking in a video needs byte range requests, which the server doesn't
+answer.
 
 A DASH instance whose URL has `src=DVB-HB` in its query (VandVD1 in
 Eutelsat's list) is a TS broadcast service that a DVB-HB gateway would tune
@@ -332,8 +353,10 @@ mDNS; they load the player from the gateway.
 Mandatory for a DM3 gateway, none implemented yet: ROUTE reception, compressed
 signalling files (FDT Content-Encoding), 48-bit TOIs (`flute.c` keeps 32 bits)
 and mDNS. For GSE only: ROHC and GSE-Lite link-layer signalling. All our
-captures use FLUTE with Content-Encoding null. (EXT_TIME is now decoded; see
-Clock.)
+captures use FLUTE with Content-Encoding null for signalling. (EXT_TIME is now
+decoded; see Clock. Files the gateway serves are decoded by NippApp; see
+Milestone 5 progress, object carousels. The NIP library itself still can't
+parse a compressed NIF, SIF, list or gateway configuration.)
 
 ## Open points
 
@@ -455,23 +478,17 @@ Still to do:
 
 - One NIF: the NIP library keeps the last one received. It only adds
   transports to the database, so nothing is lost when it is replaced.
-- Object carousels aren't received. SES's "DVB-NIP Offline Content" list
-  (`/ses.com/private/dvbi/service_list_ses_private.xml`) is in its SIF and
-  entry points, but it is broadcast in its own FLUTE session (TOI 2, 30 KB),
-  which the bootstrap gateway configuration declares as a
-  `MulticastGatewayConfigurationTransportSession` with an `ObjectCarousel` of
-  `ResourceLocator`s. The NIP library only joins sessions whose presentation
-  manifest locator (DASH or HLS) matches a service, and `nip_xml.c` doesn't
-  read object carousels, so the list never arrives and is 404 after the 8 s
-  wait. SES's offline VOD files, pictures and PDFs use the same mechanism.
-  Supporting it: parse the carousels' endpoints and resource locators, and
-  join a carousel's session when a path it carries is requested.
 - After a tuner is released, the first request for a service's manifest is
   answered at once with the stored copy while the carrier is tuned again. Not
   yet checked in a browser.
 - Broadcasts without a DVB-I list (TP37, `1067000.ts`): generate entry points
   and a list from the SIF and the database (see Serving).
 - The admin endpoints `/api/status` and `/api/scan` (see Serving).
+- Large carousel files (SES's videos and PDFs): keep them on disk rather than
+  in memory, answer byte range requests, and test with a capture that holds
+  them complete. Optionally answer 503 with `Retry-After` (from the
+  carousel's `targetAcquisitionLatency`) for a carousel file still on its
+  way, rather than 404 after 8 s.
 - VandVD1 (DVB-HB) and OTT instances can't be played through the gateway.
 - Entry point query filtering, and the move to civetweb.
 
@@ -572,6 +589,47 @@ rebuilds the normal binary. About 15 minutes; `tools/asan-check.sh scans`,
 
 33 of 33 checks pass.
 
+Object carousels (A180 8.2.6):
+
+- SES sends much of its content in object carousels: separate FLUTE sessions
+  that the announcement channel's gateway configuration declares as
+  `MulticastGatewayConfigurationTransportSession`s, each with a `tags`
+  directory and an `ObjectCarousel` of `ResourceLocator`s. There are 14: the
+  content guide schedule and its 285 images, the service guide, logos and
+  banners, SES's offline content list, pictures, VOD files, PDFs and their
+  covers, and an HbbTV application. The NIP library parsed only their
+  endpoints and joined them as bootstrap sessions, keeping nothing but
+  gateway configurations and manifests from them.
+- `nip_xml.c` now also reads each one's tags and resource locators, as a
+  carousel entry after the usual bootstrap entry. When a configuration is
+  received, a SIF entry matching a carousel's tags or one of its resources
+  takes the carousel's session, as a service takes its media sessions, and
+  remembers the resources, so a file the SIF doesn't list itself (SES's
+  schedule sits beside its tags directory `/ses.com/dvbi/cg/CoreSet`) still
+  finds its carousel. A request then tunes the carrier, joins the session and
+  stores what arrives. The announcement channel's own carousel is left to the
+  metadata monitor.
+- A SIF entry whose last segment has no `.` is a directory, and covers only
+  what is under it: before, `/ses.com/private/pictures` covered all of
+  `/ses.com/private/`, so a picture could start the PDF carousel.
+- A carousel's files are kept until replaced or over the memory limits, not
+  dropped after 30 s, as a carousel can take a minute or more to come round
+  (SES's pictures carousel is 4.6 MB).
+- NippApp encodes the request path again as RFC 3986 does (mongoose decodes
+  it, and broadcast names keep their encoding: `P.M.%20Magazin.jpg`), waits
+  for any path a SIF lists rather than only for some file extensions, and
+  decodes files sent compressed (`DVBNIP_CopyFileEncoded` gives the FDT's
+  Content-Encoding; gzip, zlib and deflate; `src/encoding.c`), as SES sends
+  its schedule gzip (87 KB, 959 KB decoded). The registry keeps compressed
+  DVB-I documents decoded.
+- Now SES's offline content list arrives in about 3 s (and the registry keeps
+  it), the covers, the service guide and the 959 KB TV-Anytime schedule are
+  served, and complete pictures arrive when their carousel comes round (one
+  after 81 s). Five of the twelve pictures are only partly in the 64 s
+  capture (e.g. `caleb-smith.jpg`), so those never arrive.
+- `tools/asan-check.sh carousels` checks the list, an encoded name and the
+  decoded schedule.
+
 Still to do for milestone 5: two carriers at once with captures that share a
 clock (needs new captures).
 
@@ -581,10 +639,14 @@ Milestones 1-4 and milestone 5's tuner contention, metadata change, several
 networks and lists, and DVB-HB handling are committed (NippApp ba57b7a,
 DVBCore 551d189).
 
-Not committed yet (fast 404, hidden carrier services, AddressSanitizer pass):
-in DVBCore `dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`; in NippApp
-`src/httpd.c`, `tools/asan-check.sh` and this file. `dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
-are local files, not to be committed.
+Not committed yet (fast 404, hidden carrier services, AddressSanitizer pass,
+object carousels, offline content in the player): in DVBCore
+`dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`, `dvbnip/src/nip_xml.c`,
+`dvbnip/src/nip_xml.h`; in NippApp `Makefile`, `inc/nippapp.h`,
+`src/encoding.c` (new), `src/httpd.c`, `src/registry.c`,
+`tools/asan-check.sh` (new), `player/player.html` and this file; in
+dvbi-client-js `src/service-list.js` and `test/parsers.test.js` (rebuild the
+player's copy with `tools/build-player.sh`).
 
 To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:
 
@@ -598,6 +660,6 @@ then `./build/nippapp -d <dir> -s <file> --scan` and open
 `11141 H 23500 pcap /home/jason/DTVkit/Streams/DvbNIP/2025-02-11_1min.pcap loop`
 for a third carrier, to see tuner contention.
 
-Next: the robustness items in "Still to do" (object carousels, the older
-manifest after a re-tune, a list for broadcasts without one, admin
-endpoints), then Phase B. Run `tools/asan-check.sh` after changes.
+Next: the robustness items in "Still to do" (the older manifest after a
+re-tune, a list for broadcasts without one, admin endpoints), then Phase B,
+whose content guide endpoint can now use SES's schedule. Run `tools/asan-check.sh` after changes.

@@ -47,7 +47,10 @@
   button { font: inherit; font-size: 13px; padding: 3px 10px; border-radius: 6px; cursor: pointer;
            border: 1px solid var(--accent); background: transparent; color: var(--accent); }
   button:hover { background: var(--accent); color: var(--panel); }
-  video { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; display: block; }
+  video, #picture, #document { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 6px; display: block; }
+  #picture { object-fit: contain; }
+  #document { border: 0; background: #fff; }
+  [hidden] { display: none !important; }
   .controls { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
   .now { flex: 1; color: var(--muted); font-size: 13px; }
   #log { margin: 8px 0 0; padding: 8px; height: 180px; overflow: auto; font: 12px/1.4 ui-monospace, monospace;
@@ -70,6 +73,8 @@
   </section>
   <section>
     <video id="video" controls muted playsinline></video>
+    <img id="picture" alt="" hidden>
+    <iframe id="document" title="Document" hidden></iframe>
     <div class="controls">
       <span class="now" id="now">Choose a service</span>
       <button id="stop" type="button">Stop</button>
@@ -83,6 +88,8 @@ import { createDvbiClient } from './vendor/dvbi-client-js/index.js';
 
 const LIVE_DELAY = 4;      // seconds behind the live edge: segments arrive once complete
 const JOIN_MARGIN = 1;     // extra seconds after joining, before the first segment is needed
+const FILE_WAIT_MS = 180000; // how long to wait for a carousel's file to come round
+const FILE_RETRY_S = 5;      // between requests for a carousel's file that hasn't arrived
 const ENTRY_POINTS = new URL('/dvbi/slep.xml', location.origin).href;
 
 const $ = (id) => document.getElementById(id);
@@ -91,6 +98,12 @@ let client = null;
 let dashPlayer = null;
 let hlsPlayer = null;
 let playToken = 0;
+let pictureUrl = null;
+
+/* the video, the picture or the document */
+function showOnly(element) {
+  for (const id of ['video', 'picture', 'document']) $(id).hidden = $(id) !== element;
+}
 let offerings = [];
 
 function log(text, level) {
@@ -101,17 +114,29 @@ function log(text, level) {
   $('log').scrollTop = $('log').scrollHeight;
 }
 
-/* How an instance is delivered: { type: 'dash' | 'hls', label, url }. A DASH instance whose URL
- * asks for src=DVB-HB is a TS service that a DVB-HB gateway re-packages as DASH (DVB-NIP Annex F),
- * labelled as such. */
+/* How an instance is delivered: { type: 'dash' | 'hls' | 'file', label, url, mimeType }. A DASH
+ * instance whose URL asks for src=DVB-HB is a TS service that a DVB-HB gateway re-packages as DASH
+ * (DVB-NIP Annex F), labelled as such. A file is content from an object carousel (SES's offline
+ * pictures, videos and documents), shown according to its MIME type. */
 function delivery(instance) {
   const parameters = instance.deliveryParameters || instance;
+  if (parameters.type === 'file' && parameters.other?.url) {
+    const mimeType = parameters.other.mimeType || '';
+    return { type: 'file', label: fileLabel(mimeType), url: parameters.other.url, mimeType };
+  }
   if (parameters.type === 'dash' && parameters.dash?.mpdUrl) {
     const url = parameters.dash.mpdUrl;
     return { type: 'dash', label: isDvbHb(url) ? 'DVB-HB' : 'DASH', url };
   }
   if (parameters.type === 'hls' && parameters.other?.url) return { type: 'hls', label: 'HLS', url: parameters.other.url };
   return null;
+}
+
+function fileLabel(mimeType) {
+  if (mimeType.startsWith('image/')) return 'Picture';
+  if (mimeType.startsWith('video/')) return 'Video';
+  if (mimeType === 'application/pdf') return 'PDF';
+  return 'Open';
 }
 
 function isDvbHb(url) {
@@ -186,7 +211,10 @@ async function loadList(offering) {
     const logo = document.createElement('img');
     logo.className = 'logo';
     logo.alt = '';
-    const logoUrl = (service.logos || []).find((l) => l.materialType === 'service_logo')?.url;
+    /* a logo, or else a banner: offline content has a cover as its banner */
+    const logos = service.logos || [];
+    const logoUrl = (logos.find((l) => l.materialType === 'service_logo') ||
+                     logos.find((l) => l.materialType === 'service_banner'))?.url;
     if (logoUrl) { logo.src = logoUrl; logo.onerror = () => { logo.style.visibility = 'hidden'; }; }
     else logo.style.visibility = 'hidden';
     const name = document.createElement('span');
@@ -224,7 +252,61 @@ function stopPlayback() {
   if (hlsPlayer) { hlsPlayer.destroy(); hlsPlayer = null; }
   video.removeAttribute('src');
   video.load();
+  showOnly(video);
+  if (pictureUrl) { URL.revokeObjectURL(pictureUrl); pictureUrl = null; }
+  $('picture').removeAttribute('src');
+  $('document').removeAttribute('src');
   for (const item of $('services').children) item.classList.remove('playing');
+}
+
+/* Content from an object carousel. The first request tunes the carrier and joins the carousel, which
+ * can take a minute or more to come round, so the request is repeated until the file arrives. */
+async function openFile(service, instance) {
+  stopPlayback();
+  const token = playToken;
+  for (const item of $('services').children) item.classList.toggle('playing', item.dataset.id === service.uniqueId);
+  $('now').textContent = (service.name || service.uniqueId) + ' (' + instance.label + ')';
+  log('Requesting ' + instance.url);
+
+  const deadline = Date.now() + FILE_WAIT_MS;
+  let response;
+  for (;;) {
+    try {
+      response = await fetch(instance.url, { cache: 'no-store' });
+    } catch (error) {
+      log('The file is not available: ' + error.message, 'err');
+      return;
+    }
+    if (token !== playToken) return;
+    if (response.ok) break;
+    if ((response.status !== 404 && response.status !== 503) || Date.now() > deadline) {
+      log('The file is not available: HTTP ' + response.status, 'err');
+      return;
+    }
+    const retry = parseInt(response.headers.get('Retry-After'), 10) || FILE_RETRY_S;
+    log(response.status === 503 ? 'No tuner is free; trying again in ' + retry + ' s'
+                                : 'Waiting for the broadcast carousel; trying again in ' + retry + ' s', 'warn');
+    await new Promise((resolve) => setTimeout(resolve, retry * 1000));
+    if (token !== playToken) return;
+  }
+
+  if (instance.mimeType.startsWith('image/')) {
+    pictureUrl = URL.createObjectURL(await response.blob());
+    if (token !== playToken) { URL.revokeObjectURL(pictureUrl); pictureUrl = null; return; }
+    $('picture').src = pictureUrl;
+    showOnly($('picture'));
+  } else if (instance.mimeType.startsWith('video/')) {
+    /* played as a file; it is in the gateway's store now */
+    response.body?.cancel();
+    showOnly(video);
+    video.src = instance.url;
+    video.play().catch(() => {});
+  } else {
+    response.body?.cancel();
+    $('document').src = instance.url;
+    showOnly($('document'));
+  }
+  log('Showing ' + instance.label.toLowerCase() + ' ' + (service.name || ''), 'ok');
 }
 
 /* The longest segment, in seconds, from a DASH MPD or an HLS playlist */
@@ -244,6 +326,7 @@ function segmentDuration(manifest, isHls) {
 }
 
 async function play(service, instance) {
+  if (instance.type === 'file') return openFile(service, instance);
   stopPlayback();
   const token = playToken;
   const isHls = instance.type === 'hls';

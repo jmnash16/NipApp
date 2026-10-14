@@ -5,7 +5,7 @@
 # at the end.
 #
 #   tools/asan-check.sh            all scenarios
-#   tools/asan-check.sh scans      one scenario: scans, networks or change
+#   tools/asan-check.sh scans      one scenario: scans, networks, change or carousels
 #
 # CAPTURES (default ../Streams/DvbNIP next to the NippApp directory) is where the captures are, PORT
 # (default 18080) the HTTP port used, and KEEP=1 keeps the working directories and logs.
@@ -198,6 +198,38 @@ scenario_change()
 }
 
 # ---------------------------------------------------------------------------------------------------
+# SES's object carousels: its offline content list, a cover whose name is percent-encoded, and the
+# content guide schedule, sent gzip
+
+# fetch <path> until it arrives (a carousel can take a while to come round), up to <seconds>
+fetch()
+{
+   local path="$1" seconds="$2" out="$3" start=$SECONDS
+   while [ $((SECONDS - start)) -lt "$seconds" ]; do
+      [ "$(curl -s -o "$out" -m 20 -w '%{http_code}' "$base$path")" = 200 ] && return 0
+   done
+   return 1
+}
+
+scenario_carousels()
+{
+   local dir="$work/carousels" conf="$work/carousels.conf" log="$work/carousels.log" size
+   echo "Object carousels (SES)"
+   source_line 11141 H 23500 pcap 2025-02-11_1min.pcap > "$conf"
+   start "$dir" "$conf" "$log" --scan || { stop "$log"; return; }
+   check "the offline content list arrives" \
+      "fetch /ses.com/private/dvbi/service_list_ses_private.xml 60 '$work/private.xml' && grep -q '<ServiceList' '$work/private.xml'"
+   check "the registry keeps it" "[ -f '$dir/registry/ses.com/private/dvbi/service_list_ses_private.xml' ]"
+   check "a percent-encoded name is found (P.M.%20Magazin.jpg)" \
+      "fetch '/ses.com/private/pdf/covers/P.M.%20Magazin.jpg' 60 '$work/cover.jpg'"
+   check "the content guide schedule arrives" \
+      "fetch /ses.com/dvbi/cg/tva_schedule_20250210230000_P28DT20M_CoreSet.xml 90 '$work/schedule.xml'"
+   size=$(stat -c %s "$work/schedule.xml" 2>/dev/null || echo 0)
+   check "the schedule is served decoded ($size bytes)" "[ $size -gt 900000 ] && head -c 40 '$work/schedule.xml' | grep -q '<?xml'"
+   stop "$log"
+}
+
+# ---------------------------------------------------------------------------------------------------
 
 if curl -s -o /dev/null -m 2 "$base/time"; then
    echo "Port $port is in use; set PORT" >&2
@@ -211,10 +243,10 @@ fi
 echo "Building NippApp with AddressSanitizer"
 make clean > /dev/null && make ASAN=1 > "$work/build.log" 2>&1 || { echo "build failed, see $work/build.log"; KEEP=1; exit 1; }
 
-scenarios="${1:-scans networks change}"
+scenarios="${1:-scans networks change carousels}"
 for scenario in $scenarios; do
    case "$scenario" in
-      scans|networks|change) "scenario_$scenario" ;;
+      scans|networks|change|carousels) "scenario_$scenario" ;;
       *) echo "unknown scenario $scenario" >&2; failures=$((failures + 1)) ;;
    esac
 done

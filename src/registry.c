@@ -177,7 +177,9 @@ static void FileStored(void *user_data, S_FLUTE_FILE *file)
 {
    S_FLUTE_FILE_READ reader;
    U8BIT *data;
+   U8BIT *decoded;
    U32BIT len;
+   U32BIT decoded_len;
    size_t slep_len = strlen(SLEP_TYPE);
 
    USE_UNWANTED_PARAM(user_data);
@@ -195,6 +197,20 @@ static void FileStored(void *user_data, S_FLUTE_FILE *file)
    }
    FLUTE_FileOpen(&reader, file);
    len = FLUTE_FileRead(&reader, data, file->length);
+
+   /* a document sent compressed is kept decoded */
+   if ((file->encoding != NULL) && (file->encoding[0] != '\0') &&
+       (strcasecmp((const char *)file->encoding, "null") != 0))
+   {
+      if (!ENC_Decode((const char *)file->encoding, data, len, &decoded, &decoded_len))
+      {
+         free(data);
+         return;
+      }
+      free(data);
+      data = decoded;
+      len = decoded_len;
+   }
 
    KeepDocument((const char *)file->filename, (const char *)file->filetype, data, len, file->version);
 

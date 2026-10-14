@@ -95,4 +95,15 @@ BOOLEAN REG_IsDvbiType(const char *filetype);
  */
 BOOLEAN REG_Load(const char *location, U8BIT **data, U32BIT *len, char **filetype);
 
+/**
+ * @brief   Decodes content sent compressed (the FDT's Content-Encoding: gzip, zlib or deflate)
+ * @param   encoding the Content-Encoding
+ * @param   data the content as broadcast
+ * @param   len its length
+ * @param   decoded returns the decoded content, zero-terminated, to be freed with free()
+ * @param   decoded_len returns its length
+ * @return  TRUE if decoded; FALSE for an encoding not known, or content that doesn't decode
+ */
+BOOLEAN ENC_Decode(const char *encoding, const U8BIT *data, U32BIT len, U8BIT **decoded, U32BIT *decoded_len);
+
 #endif /* _NIPPAPP_H */

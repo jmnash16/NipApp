@@ -71,6 +71,9 @@
 #define MAX_PLAYER_FILE       (8 * 1024 * 1024)
 #define MAX_PATH_LEN          1024
 #define HOLD_STEP_MS          200
+/* Retry-After when no tuner is free: a tuner is freed for a new request as soon as the services
+ * using it have stopped, 20-30 s after their last request */
+#define NO_TUNER_RETRY_S      10
 
 /* The broadcast gives the DVB-I service list entry points a URN, not a URL (clause 8.2.5.1), so
  * the gateway chooses where to serve them (clause 8.1.7.3) */
@@ -198,6 +201,18 @@ static void SendResponse(struct mg_connection *conn, int status, const char *sta
 static void SendNotFound(struct mg_connection *conn)
 {
    SendResponse(conn, 404, "Not Found", "text/plain", "Cache-Control: no-store\r\n", NULL, 0);
+}
+
+/* No tuner is free for the carrier (8.5.3): try again once an idle one may have been released */
+static void SendNoTuner(struct mg_connection *conn)
+{
+   char headers[128];
+
+   /* exposed, as a client served from elsewhere can't read it otherwise */
+   snprintf(headers, sizeof(headers),
+      "Cache-Control: no-store\r\nRetry-After: %d\r\nAccess-Control-Expose-Headers: Retry-After\r\n",
+      NO_TUNER_RETRY_S);
+   SendResponse(conn, 503, "Service Unavailable", "text/plain", headers, NULL, 0);
 }
 
 static void GetHost(struct mg_connection *conn, char *host)
@@ -697,6 +712,12 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
       if (!WorthWaitingFor(path) || (waited >= HOLD_MS))
       {
          SendNotFound(conn);
+         return;
+      }
+      if (DVBNIP_IsTunerUnavailable((const U8BIT *)path))
+      {
+         printf("NippApp: no tuner free for %s\n", path);
+         SendNoTuner(conn);
          return;
       }
       usleep(HOLD_STEP_MS * 1000);

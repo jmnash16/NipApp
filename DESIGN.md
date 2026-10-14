@@ -423,6 +423,18 @@ Done so far:
   transport, so a service requested again after its tuner was released was
   never re-tuned and answered 404.)
 
+Done later (2026-10-13):
+
+- HLS: DVB-I has no standard HLS delivery for NIP (DASH is the only mandatory
+  format, 9.1; NIP services use DASHDeliveryParameters, 8.3.3.2). Decided
+  2026-10-13: the player keeps its HLS button, shown beside DASH whenever the
+  list signals an HLS instance, and milestone 4's criterion is "plays DASH,
+  and HLS when the list signals it". `nip_xml.c` now takes an
+  IdentifierBasedDeliveryParameters instance as HLS only when its
+  `contentType` is `application/vnd.apple.mpegurl` (or
+  `application/x-mpegURL`); others are skipped. Every HLS instance in the
+  captures has that type.
+
 Still to do:
 
 - The registry keeps one SLEP, as the NIP library does: each network's SLEP has
@@ -435,31 +447,69 @@ Still to do:
   received. The NIF only adds transports to the database, so nothing is lost
   when it is replaced. The DVB-I list gives the channels' names and LCNs; with
   two lists (Inverto's `main_service_list.xml` and Eutelsat's), whichever came
-  last names the channels. SIFs are kept per provider.
-- HLS: DVB-I has no standard HLS delivery for NIP (DASH is the only mandatory
-  format, 9.1; NIP services use DASHDeliveryParameters, 8.3.3.2). Decided
-  2026-10-13: the player keeps its HLS button, shown beside DASH whenever the
-  list signals an HLS instance, and milestone 4's criterion is "plays DASH,
-  and HLS when the list signals it". `nip_xml.c` now takes an
-  IdentifierBasedDeliveryParameters instance as HLS only when its
-  `contentType` is `application/vnd.apple.mpegurl` (or
-  `application/x-mpegURL`); others are skipped. Every HLS instance in the
-  captures has that type.
+  last names the channels. SIFs are kept per provider. With Inverto,
+  Eutelsat and SES searched together, SES's list came last: VandVA2 is named
+  "A2", and Inverto's B2 and SES's B2 both get LCN 2.
+- After a tuner is released, the first request for a service's manifest is
+  answered at once with the stored copy while the carrier is tuned again. Not
+  yet checked in a browser.
 - VandVD1 (DVB-HB) and OTT instances can't be played through the gateway.
 - Entry point query filtering, and the move to civetweb.
 
-## Resume here (state at 2026-10-13)
+## Milestone 5 progress
 
-Milestones 1-3 and the milestone 4 work so far are committed: NippApp
-a75ea2f (player, wall clock, registry fixes), DVBCore 0d681e7 (EXT_TIME wall
-clock, scan waits for the entry points and a DVB-I list, `ACTL_TuneOff`).
+Tuner contention (8.5.3):
 
-Not committed yet: in DVBCore the SIF merge (`dvbnip/src/nip_mgr.c`,
-`dvbnip/src/nip_xml.c`, `dvbnip/src/nip_xml.h`) and MPE tuning after a restart
-(`dvbnip/src/nip_task.c`, `dvbnip/src/nip_task.h`), and the HLS content type
-check (`dvbnip/src/nip_xml.c`); this file.
-`dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace` are
-local files, not to be committed.
+- DVBCore: when the NIP task can't get a tuner path, it now reports it
+  (`DVBNIP_TaskTuneFailed`). Before, the stream stayed marked as tuned, so the
+  request waited 8 s for a 404 and the service couldn't be tried again until
+  the next garbage collection.
+- If another carrier's tuner is only waiting to be released (no service
+  playing, starting or requested in the last 5 s), it is released at once and
+  the tune tried again, rather than after the usual 10 s.
+- Otherwise the carrier is marked as having no tuner until a tuner is freed or
+  a new request tries again, and `DVBNIP_IsTunerUnavailable(path)` says so.
+  NippApp answers 503 with `Retry-After: 10` (exposed to other origins), at
+  once rather than after 8 s.
+- The player retries after `Retry-After` while the service is still selected,
+  saying that no tuner is free.
+- Tested with Inverto, Eutelsat and SES on the two tuners: B1 gets 503 while
+  VandVA1 and VandVA2 are in use; about 24 s after VandVA2's last request its
+  service stops, and the next B1 request takes its tuner. AddressSanitizer
+  clean.
+
+Metadata version change:
+
+- Tested with two Eutelsat captures of carrier 601: `1087000.ts` (April 2024)
+  and `20240902Hbtxp6_1mn.ts` (September 2024, services moved under
+  `/eutelsat/`). Searched with the first, then restarted without a search on
+  the second.
+- DVBCore bug fixed (`nip_task.c`): every on-demand tune started a scan
+  (`DVBNIP_AddFluteSessionBootstrap`), which left the NIP library waiting for a
+  search to finish, so a new SIF or DVB-I list updated the service table and
+  the served list but never the channels in the database, and the metadata
+  monitor was never stopped. A tune for services now only starts the metadata
+  monitor (`DVBNIP_StartMetadataMonitor`).
+- Now the new SIF replaces the old one (same provider), April's channels are
+  deleted, the `/eutelsat/` channels are added with LCNs 11-13 from the new
+  list, and the database is saved; the old paths answer 404 and the new ones
+  play.
+- DVBCore bug fixed (`ap_dbdef.c`): deleting a service loaded from the
+  database leaked its name (`name_str`); found by AddressSanitizer here, which
+  is now clean.
+
+Still to do for milestone 5: two carriers at once with captures that share a
+clock, and a full AddressSanitizer pass over all of it.
+
+## Resume here (state at 2026-10-14)
+
+Milestones 1-4 are committed (NippApp 0a325a7, DVBCore 734b47d).
+
+Not committed yet (milestone 5 so far): in DVBCore `dvbnip/inc/nip_mgr.h`,
+`dvbnip/src/nip_mgr.c`, `dvbnip/src/nip_task.c`, `dvbnip/src/nip_task.h`,
+`dvb/src/ap_dbdef.c`; in NippApp `src/httpd.c`, `player/player.html` and this
+file. `dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
+are local files, not to be committed.
 
 To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:
 
@@ -469,6 +519,8 @@ To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:
 ```
 
 then `./build/nippapp -d <dir> -s <file> --scan` and open
-`http://<ip>:8080/player/`.
+`http://<ip>:8080/player/`. Add
+`11141 H 23500 pcap /home/jason/DTVkit/Streams/DvbNIP/2025-02-11_1min.pcap loop`
+for a third carrier, to see tuner contention.
 
-Next: milestone 5.
+Next: the rest of milestone 5.

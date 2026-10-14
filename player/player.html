@@ -239,7 +239,15 @@ async function play(service, instance) {
   log('Requesting ' + url);
   let manifest;
   try {
-    const response = await fetch(url, { cache: 'no-store' });
+    let response = await fetch(url, { cache: 'no-store' });
+    /* 503: every tuner is in use; the gateway frees one when the services using it stop */
+    while (response.status === 503) {
+      const retry = parseInt(response.headers.get('Retry-After'), 10) || 10;
+      log('No tuner is free for this service; trying again in ' + retry + ' s', 'err');
+      await new Promise((resolve) => setTimeout(resolve, retry * 1000));
+      if (token !== playToken) return;
+      response = await fetch(url, { cache: 'no-store' });
+    }
     if (!response.ok) throw new Error('HTTP ' + response.status);
     manifest = await response.text();
   } catch (error) {

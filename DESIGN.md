@@ -344,8 +344,6 @@ Clock.)
   Inverto and SES searched together, SES's B1 and B2 get 1003 and 1004. The
   registry (milestone 4) serves each broadcast list with its own LCNs, so
   clients are not affected.
-- The MPE carrier service (DVB-NIP-VV) is itself listed as a channel, at LCN
-  1000. It should probably be hidden.
 
 ## Milestone 2 findings
 
@@ -455,17 +453,25 @@ Done later (2026-10-13):
 
 Still to do:
 
-- A file that is neither in the store nor the registry is waited for, then
-  404, even when no SIF lists its path. Answering 404 at once for paths the SIF
-  doesn't list (8.5.3) needs a lookup the NIP library doesn't offer yet.
 - One NIF: the NIP library keeps the last one received. It only adds
   transports to the database, so nothing is lost when it is replaced.
-- SES's "DVB-NIP Offline Content" list (`/ses.com/private/dvbi/...`) is in its
-  SIF and entry points but doesn't arrive within the 8 s wait, so it answers
-  404.
+- Object carousels aren't received. SES's "DVB-NIP Offline Content" list
+  (`/ses.com/private/dvbi/service_list_ses_private.xml`) is in its SIF and
+  entry points, but it is broadcast in its own FLUTE session (TOI 2, 30 KB),
+  which the bootstrap gateway configuration declares as a
+  `MulticastGatewayConfigurationTransportSession` with an `ObjectCarousel` of
+  `ResourceLocator`s. The NIP library only joins sessions whose presentation
+  manifest locator (DASH or HLS) matches a service, and `nip_xml.c` doesn't
+  read object carousels, so the list never arrives and is 404 after the 8 s
+  wait. SES's offline VOD files, pictures and PDFs use the same mechanism.
+  Supporting it: parse the carousels' endpoints and resource locators, and
+  join a carousel's session when a path it carries is requested.
 - After a tuner is released, the first request for a service's manifest is
   answered at once with the stored copy while the carrier is tuned again. Not
   yet checked in a browser.
+- Broadcasts without a DVB-I list (TP37, `1067000.ts`): generate entry points
+  and a list from the SIF and the database (see Serving).
+- The admin endpoints `/api/status` and `/api/scan` (see Serving).
 - VandVD1 (DVB-HB) and OTT instances can't be played through the gateway.
 - Entry point query filtering, and the move to civetweb.
 
@@ -538,18 +544,46 @@ Several networks and lists:
 - The player collapses white space in names (Eutelsat lays them out over
   several lines).
 
+Fast 404 and hidden carrier services:
+
+- A request for a path that no SIF lists, nor any directory or service it
+  belongs to, is answered 404 at once (8.5.3) rather than after the 8 s wait
+  (`DVBNIP_IsPathSignalled`). Eutelsat's logos (`/materials/...`, never
+  broadcast) now fail in under 1 ms.
+- Each NIP stream's own service (DVB-NIP-VV, which carries the MPE) is hidden
+  and not selectable in the database, so it is no longer offered as a channel
+  (`UpdateChannels`). The legacy TS service is still listed.
+
+AddressSanitizer pass: `tools/asan-check.sh` builds NippApp with
+AddressSanitizer, runs it through the scenarios on the captures and checks the
+results and that every run ends with no AddressSanitizer error or leak, then
+rebuilds the normal binary. About 15 minutes; `tools/asan-check.sh scans`,
+`networks` or `change` runs one scenario, `KEEP=1` keeps the logs.
+
+- scans: each capture searched on its own (Inverto, Eutelsat, HBtxp6, SES,
+  TP37; `1067000.ts` is left out as 9 GB, `1077000.ts` as a copy of
+  `1097000.ts`), with a minimum number of channels each.
+- networks: Inverto, Eutelsat and SES on two tuners: names, hidden carrier
+  services, three SIFs and entry points, merged `/dvbi/slep.xml`, 503 with
+  both tuners in use, 501 for DVB-HB, fast 404; then a restart without a
+  search, with each B1 tuning its own carrier.
+- change: Eutelsat April to September 2024: the old path gone, the new one
+  playing, new entry points, new channels in the database.
+
+33 of 33 checks pass.
+
 Still to do for milestone 5: two carriers at once with captures that share a
-clock, and a full AddressSanitizer pass over all of it.
+clock (needs new captures).
 
 ## Resume here (state at 2026-10-14)
 
-Milestones 1-4 and milestone 5's tuner contention and metadata change are
-committed (NippApp 3fc6016, DVBCore 9fb3cb4).
+Milestones 1-4 and milestone 5's tuner contention, metadata change, several
+networks and lists, and DVB-HB handling are committed (NippApp ba57b7a,
+DVBCore 551d189).
 
-Not committed yet (several networks and lists): in DVBCore
-`dvbnip/src/nip_mgr.c`, `dvbnip/src/nip_misc.c`, `dvbnip/src/nip_misc.h`; in
-NippApp `Makefile`, `src/registry.c`, `src/httpd.c` (DVB-HB 501),
-`player/player.html` (also the DVB-HB label) and this file. `dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
+Not committed yet (fast 404, hidden carrier services, AddressSanitizer pass):
+in DVBCore `dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`; in NippApp
+`src/httpd.c`, `tools/asan-check.sh` and this file. `dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
 are local files, not to be committed.
 
 To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:
@@ -564,4 +598,6 @@ then `./build/nippapp -d <dir> -s <file> --scan` and open
 `11141 H 23500 pcap /home/jason/DTVkit/Streams/DvbNIP/2025-02-11_1min.pcap loop`
 for a third carrier, to see tuner contention.
 
-Next: the rest of milestone 5.
+Next: the robustness items in "Still to do" (object carousels, the older
+manifest after a re-tune, a list for broadcasts without one, admin
+endpoints), then Phase B. Run `tools/asan-check.sh` after changes.

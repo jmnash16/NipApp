@@ -709,7 +709,8 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
          from_registry = TRUE;
          break;
       }
-      if (!WorthWaitingFor(path) || (waited >= HOLD_MS))
+      /* nothing to wait for when no SIF lists the file or its directory (8.5.3) */
+      if (!WorthWaitingFor(path) || (waited >= HOLD_MS) || !DVBNIP_IsPathSignalled((const U8BIT *)path))
       {
          SendNotFound(conn);
          return;

@@ -834,6 +834,36 @@ static void SendPlayerFile(struct mg_connection *conn, const char *uri)
    fclose(f);
 }
 
+/* Whether a query asks for the DVB-HB function: src=DVB-HB, which DVB-NIP Annex F uses for TS
+ * broadcast services that the gateway would tune and re-package as DASH (DVB A179) */
+static BOOLEAN IsDvbHbRequest(const char *query)
+{
+   const char *p;
+   size_t len;
+
+   for (p = query; p != NULL; p = strchr(p, '&'))
+   {
+      if (*p == '&')
+      {
+         p++;
+      }
+      len = strcspn(p, "&");
+      if ((len == strlen("src=DVB-HB")) && (strncasecmp(p, "src=DVB-HB", len) == 0))
+      {
+         return TRUE;
+      }
+   }
+   return FALSE;
+}
+
+/* NippApp has no DVB-HB function: say so at once rather than wait for a file that won't arrive */
+static void SendNoDvbHb(struct mg_connection *conn)
+{
+   static const char text[] = "DVB-HB services (TS broadcast services re-packaged as DASH) are not supported by this gateway\n";
+
+   SendResponse(conn, 501, "Not Implemented", "text/plain", "Cache-Control: no-store\r\n", text, strlen(text));
+}
+
 static int BeginRequestHandler(struct mg_connection *conn)
 {
    const struct mg_request_info *request_info = mg_get_request_info(conn);
@@ -862,6 +892,11 @@ static int BeginRequestHandler(struct mg_connection *conn)
    else if (strncmp(uri, PLAYER_PREFIX, strlen(PLAYER_PREFIX)) == 0)
    {
       SendPlayerFile(conn, uri);
+   }
+   else if (IsDvbHbRequest(request_info->query_string))
+   {
+      printf("NippApp: DVB-HB not supported: %s?%s\n", uri, request_info->query_string);
+      SendNoDvbHb(conn);
    }
    else
    {

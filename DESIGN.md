@@ -179,6 +179,7 @@ is always the broadcast path.
 | any other broadcast path | manifests, segments and other files from the file store |
 | `/dvbi/slep.xml` | the DVB-I service list entry points, which the broadcast identifies only by URN (`urn:dvb:metadata:nativeip:dvb-i-slep`, 8.2.5.1), so the gateway chooses the URL (8.1.7.3); with several networks, one document offering every network's lists |
 | `/time` | the NIP wall clock (8.6.3) |
+| any path with `src=DVB-HB` in its query | 501 Not Implemented: a TS broadcast service for a DVB-HB gateway to re-package as DASH (Annex F), which NippApp can't do |
 | `/api/status`, `/api/scan` | admin only: sources, tuners, sessions, store usage; start a rescan. The player never uses these. |
 
 The gateway's address in rewritten URLs is a literal IP address, not a `.local`
@@ -304,7 +305,8 @@ A DASH instance whose URL has `src=DVB-HB` in its query (VandVD1 in
 Eutelsat's list) is a TS broadcast service that a DVB-HB gateway would tune
 and re-package as DASH (Annex F, informative; DVB A179). The player labels its
 button "DVB-HB" rather than DASH, and still plays it as DASH. NippApp has no
-DVB-HB function, so the request waits and gets 404, and the player says why.
+DVB-HB function, so it answers any request with `src=DVB-HB` in its query at
+once with 501 Not Implemented, and the player says why.
 
 ## Discovery (Phase B)
 
@@ -546,7 +548,8 @@ committed (NippApp 3fc6016, DVBCore 9fb3cb4).
 
 Not committed yet (several networks and lists): in DVBCore
 `dvbnip/src/nip_mgr.c`, `dvbnip/src/nip_misc.c`, `dvbnip/src/nip_misc.h`; in
-NippApp `Makefile`, `src/registry.c`, `player/player.html` and this file. `dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
+NippApp `Makefile`, `src/registry.c`, `src/httpd.c` (DVB-HB 501),
+`player/player.html` (also the DVB-HB label) and this file. `dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
 are local files, not to be committed.
 
 To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:

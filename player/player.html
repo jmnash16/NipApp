@@ -269,7 +269,7 @@ async function play(service, instance) {
     manifest = await response.text();
   } catch (error) {
     log('The manifest is not available: ' + error.message, 'err');
-    if (instance.label === 'DVB-HB') log('DVB-HB services need a gateway with a DVB-HB function, which NippApp does not have yet', 'err');
+    if (instance.label === 'DVB-HB') log('DVB-HB services need a gateway with a DVB-HB function, which this gateway does not have', 'err');
     return;
   }
   const wait = LIVE_DELAY + segmentDuration(manifest, isHls) + JOIN_MARGIN;

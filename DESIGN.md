@@ -300,6 +300,12 @@ In dvbi-client-js's results a service instance's delivery is in
 `instance.deliveryParameters` (`type` `dash` with `dash.mpdUrl`, or `hls` with
 `other.url`).
 
+A DASH instance whose URL has `src=DVB-HB` in its query (VandVD1 in
+Eutelsat's list) is a TS broadcast service that a DVB-HB gateway would tune
+and re-package as DASH (Annex F, informative; DVB A179). The player labels its
+button "DVB-HB" rather than DASH, and still plays it as DASH. NippApp has no
+DVB-HB function, so the request waits and gets 404, and the player says why.
+
 ## Discovery (Phase B)
 
 DNS-SD/mDNS is mandatory for a DM3 gateway (11.1): service type

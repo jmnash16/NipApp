@@ -101,12 +101,25 @@ function log(text, level) {
   $('log').scrollTop = $('log').scrollHeight;
 }
 
-/* How an instance is delivered: { type: 'dash' | 'hls' | ..., url } */
+/* How an instance is delivered: { type: 'dash' | 'hls', label, url }. A DASH instance whose URL
+ * asks for src=DVB-HB is a TS service that a DVB-HB gateway re-packages as DASH (DVB-NIP Annex F),
+ * labelled as such. */
 function delivery(instance) {
   const parameters = instance.deliveryParameters || instance;
-  if (parameters.type === 'dash' && parameters.dash?.mpdUrl) return { type: 'dash', url: parameters.dash.mpdUrl };
-  if (parameters.type === 'hls' && parameters.other?.url) return { type: 'hls', url: parameters.other.url };
+  if (parameters.type === 'dash' && parameters.dash?.mpdUrl) {
+    const url = parameters.dash.mpdUrl;
+    return { type: 'dash', label: isDvbHb(url) ? 'DVB-HB' : 'DASH', url };
+  }
+  if (parameters.type === 'hls' && parameters.other?.url) return { type: 'hls', label: 'HLS', url: parameters.other.url };
   return null;
+}
+
+function isDvbHb(url) {
+  try {
+    return (new URL(url, location.href).searchParams.get('src') || '').toUpperCase() === 'DVB-HB';
+  } catch (error) {
+    return false;
+  }
 }
 
 /* Some lists lay out names over several lines (Eutelsat's), so white space is collapsed */
@@ -184,7 +197,10 @@ async function loadList(offering) {
     for (const instance of playable) {
       const button = document.createElement('button');
       button.type = 'button';
-      button.textContent = instance.type === 'dash' ? 'DASH' : 'HLS';
+      button.textContent = instance.label;
+      if (instance.label === 'DVB-HB') {
+        button.title = 'A TS broadcast service, which the gateway must re-package as DASH (DVB-HB, DVB-NIP Annex F)';
+      }
       button.onclick = () => play(service, instance);
       item.appendChild(button);
     }
@@ -233,7 +249,7 @@ async function play(service, instance) {
   const isHls = instance.type === 'hls';
   const url = instance.url;
   for (const item of $('services').children) item.classList.toggle('playing', item.dataset.id === service.uniqueId);
-  $('now').textContent = (service.name || service.uniqueId) + (isHls ? ' (HLS)' : ' (DASH)');
+  $('now').textContent = (service.name || service.uniqueId) + ' (' + instance.label + ')';
 
   /* The first request tunes the carrier; the gateway answers once the manifest has arrived. Only
    * segments that start after joining are received, so the player starts once enough of them have. */
@@ -253,6 +269,7 @@ async function play(service, instance) {
     manifest = await response.text();
   } catch (error) {
     log('The manifest is not available: ' + error.message, 'err');
+    if (instance.label === 'DVB-HB') log('DVB-HB services need a gateway with a DVB-HB function, which NippApp does not have yet', 'err');
     return;
   }
   const wait = LIVE_DELAY + segmentDuration(manifest, isHls) + JOIN_MARGIN;

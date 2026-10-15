@@ -42,7 +42,7 @@
 #include <unistd.h>
 
 /* third party header files */
-#include "mongoose.h"
+#include "civetweb.h"
 
 /* STB header files */
 #include "techtype.h"
@@ -137,10 +137,12 @@ BOOLEAN HTTPD_Start(const char *port, const char *player_dir)
    memset(&callbacks, 0, sizeof(callbacks));
    callbacks.begin_request = BeginRequestHandler;
 
+   mg_init_library(0);
    ctx = mg_start(&callbacks, NULL, options);
    if (ctx == NULL)
    {
       fprintf(stderr, "NippApp: cannot start the HTTP server on port %s; is it in use?\n", port);
+      mg_exit_library();
       return FALSE;
    }
 
@@ -154,6 +156,7 @@ void HTTPD_Stop(void)
    {
       mg_stop(ctx);
       ctx = NULL;
+      mg_exit_library();
    }
 }
 
@@ -884,7 +887,7 @@ static void SendPlayerFile(struct mg_connection *conn, const char *uri)
    fclose(f);
 }
 
-/* The request path as the broadcast names files. mongoose decodes %XX in the path, but the
+/* The request path as the broadcast names files. civetweb decodes %XX in the path, but the
  * Content-Locations of broadcast files, SIF entries and DVB-I lists keep the URL encoding
  * (clause 8.2.8: /ses.com/private/pdf/covers/P.M.%20Magazin.jpg), so the decoded path is encoded
  * again as RFC 3986 encodes a path: everything but unreserved characters, sub-delimiters, ':', '@'
@@ -955,15 +958,25 @@ void HTTPD_AllowAdminFromAny(BOOLEAN any)
    admin_from_any = any;
 }
 
+/* A request from this machine: 127.x.x.x, ::1, or 127.x.x.x as an IPv4-mapped IPv6 address */
+static BOOLEAN IsLoopback(const char *address)
+{
+   if (strncmp(address, "::ffff:", 7) == 0)
+   {
+      address += 7;
+   }
+   return (strncmp(address, "127.", 4) == 0) || (strcmp(address, "::1") == 0);
+}
+
 /* The admin API: /api/status (GET) and /api/scan (POST), answered to this machine only unless
  * --admin-from-any is given */
 static void SendAdmin(struct mg_connection *conn, const struct mg_request_info *request_info)
 {
    const char *method = request_info->request_method;
-   const char *uri = request_info->uri;
+   const char *uri = request_info->local_uri;
    char *json;
 
-   if (!admin_from_any && (((unsigned long)request_info->remote_ip >> 24) != 127))
+   if (!admin_from_any && !IsLoopback(request_info->remote_addr))
    {
       SendResponse(conn, 403, "Forbidden", "text/plain", "Cache-Control: no-store\r\n", NULL, 0);
    }
@@ -1055,7 +1068,7 @@ static BOOLEAN SendGuide(struct mg_connection *conn, const char *path, const cha
 static int BeginRequestHandler(struct mg_connection *conn)
 {
    const struct mg_request_info *request_info = mg_get_request_info(conn);
-   const char *uri = request_info->uri;
+   const char *uri = request_info->local_uri;
    char path[MAX_PATH_LEN * 3];
 
    if (strncmp(uri, "/api/", 5) == 0)

@@ -35,9 +35,11 @@ These files are NippApp's own and are not copies:
 - `hw/src/stubs.c`: AV, OSD, PVR, front panel, VBI and EBU functions, which a
   headless gateway does not need.
 
-`third_party/mongoose/` is mongoose 3.8 (MIT licence, in `LICENSE`), copied from
-`DVBCore/dvbnip/test` at `9bea543`. Later mongoose releases are GPL; the plan is
-to move to civetweb, the MIT fork of mongoose 3.8, which has nearly the same API.
+`third_party/civetweb/` is civetweb 1.16 (MIT licence, in `LICENSE.md`; source and
+checksum in `VERSION`), the maintained MIT fork of mongoose: `civetweb.c`,
+`civetweb.h` and the `.inl` files they include, unchanged. It replaced mongoose
+3.8 (from the test tool), as later mongoose releases are GPL. It is built
+without TLS, CGI and file serving (`NO_SSL`, `NO_CGI`, `NO_FILES`).
 
 Many of the copied files are ISO-8859-1 encoded. Use `grep -a` on them, or
 matches are silently skipped.

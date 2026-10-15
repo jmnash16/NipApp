@@ -42,11 +42,11 @@ SRCS = src/main.c \
        platform/hw/src/stbhwsp.c \
        platform/hw/src/stbhwtun.c \
        platform/hw/src/stubs.c \
-       third_party/mongoose/mongoose.c
+       third_party/civetweb/civetweb.c
 
 INCLUDES = inc \
            platform/hw/inc \
-           third_party/mongoose \
+           third_party/civetweb \
            $(DVBCORE_ROOT)/inc \
            $(DVBCORE_ROOT)/platform/inc \
            $(DVBCORE_ROOT)/midware/stb/inc \
@@ -57,8 +57,9 @@ INCLUDES = inc \
 # Must match the DVBCore build so that shared structures have the same layout
 DEFINES = OSD_32_BIT COLOUR_DEPTH=32 DVBNIP_BUILD _FILE_OFFSET_BITS=64
 
-# mongoose 3.8 (MIT): no TLS or CGI, and its warnings are not NippApp's
-$(BUILD_DIR)/obj/third_party/mongoose/mongoose.o: CFLAGS += -DNO_SSL -DNO_CGI -w
+# civetweb 1.16 (MIT): no TLS, CGI or file serving (NippApp answers every request itself), and its
+# warnings are not NippApp's
+$(BUILD_DIR)/obj/third_party/civetweb/civetweb.o: CFLAGS += -DNO_SSL -DNO_CGI -DNO_FILES -DNO_CACHING -w
 
 CFLAGS += -Wall $(addprefix -D,$(DEFINES)) $(addprefix -I,$(INCLUDES)) -MMD -MP
 ifeq ($(DEBUG),0)

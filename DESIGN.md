@@ -116,7 +116,7 @@ NippApp/
   tools/
     build-player.sh      builds player/vendor/
   third_party/
-    mongoose/            mongoose 3.8 (MIT), from the test tool; to be replaced by civetweb
+    civetweb/            civetweb 1.16 (MIT), built without TLS, CGI and file serving
 ```
 
 NippApp keeps its own copy of the platform layer rather than building from
@@ -505,7 +505,6 @@ Still to do:
   `Retry-After: 10`; a later refinement could take the delay from the
   carousel's `targetAcquisitionLatency`.)
 - VandVD1 (DVB-HB) and OTT instances can't be played through the gateway.
-- The move to civetweb.
 
 ## Milestone 5 progress
 
@@ -745,6 +744,16 @@ second gateway renamed "NippApp on Zen #2"; both withdrawn when stopped.
 `tools/asan-check.sh networks` checks the announcement when avahi-browse is
 installed.
 
+civetweb (2026-10-15): the HTTP server is now civetweb 1.16, the maintained
+MIT fork of mongoose (later mongoose releases are GPL), in
+`third_party/civetweb/`, built without TLS, CGI and file serving. The API is
+mongoose's, so `src/httpd.c` changed little: the request path is `local_uri`
+(URL-decoded, as before, so it is still encoded again), the client address
+is a string (the admin API's local check accepts 127.x.x.x, `::1` and
+IPv4-mapped addresses), and the library is started and stopped with
+`mg_init_library` and `mg_exit_library`. Every request is still answered by
+NippApp's own handler.
+
 ## Resume here (state at 2026-10-15)
 
 Committed: milestones 1-4, milestone 5 and the admin API (NippApp f48cdf2,
@@ -757,6 +766,8 @@ Not committed yet:
   `dvbnip/src/nip_mgr.c` (`DVBNIP_ListCarouselResources`,
   `DVBNIP_IsCarouselPath`); in NippApp `Makefile`, `inc/nippapp.h`,
   `src/guide.c` (new), `src/mdns.c` (new), `src/httpd.c`, `src/main.c`,
+  `third_party/civetweb/` (new; `third_party/mongoose/` removed),
+  `platform/COPIED.md`,
   `src/registry.c`, `player/player.html`, `tools/asan-check.sh` and this
   file. Building with the mDNS announcement needs `libavahi-client-dev`, and
   running it `avahi-daemon`. `tools/asan-check.sh`: 57 of 57.
@@ -784,6 +795,6 @@ changes.
 
 Milestone 5 still needs captures of two carriers with the same clock.
 
-Next: the rest of Phase B: civetweb, an independent DVB-I client; later, large
+Next: the rest of Phase B: an independent DVB-I client; later, large
 carousel files (on disk, byte ranges; after civetweb, and needs a capture
 that holds them complete). Optional later: DVB-HB support (VandVD1).

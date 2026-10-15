@@ -178,6 +178,7 @@ is always the broadcast path.
 | broadcast path of the content guide manifest | the content guide endpoint: `?sid&start&end`, `?sid&now_next=true` (Annex D.6.2; Phase 5) |
 | any other broadcast path | manifests, segments and other files from the file store |
 | `/dvbi/slep.xml` | the DVB-I service list entry points, which the broadcast identifies only by URN (`urn:dvb:metadata:nativeip:dvb-i-slep`, 8.2.5.1), so the gateway chooses the URL (8.1.7.3); with several networks, one document offering every network's lists |
+| `/dvbi/nippapp_list.xml` | a DVB-I list of the services no broadcast list covers (see below), offered in the entry points when there are any |
 | `/time` | the NIP wall clock (8.6.3) |
 | any path with `src=DVB-HB` in its query | 501 Not Implemented: a TS broadcast service for a DVB-HB gateway to re-package as DASH (Annex F), which NippApp can't do |
 | `/api/status`, `/api/scan` | admin only: sources, tuners, sessions, store usage; start a rescan. The player never uses these. |
@@ -207,9 +208,14 @@ lists are available after a restart and while their carrier isn't tuned
 carrier (9.5.4), so a list served from the registry is also refreshed from
 the broadcast.
 
-When the broadcast has no DVB-I list (TP37, 1067000.ts; not conformant),
-NippApp generates an entry points file and a list from the SIF and the
-database, declaring a content guide URL so the service guide has an endpoint.
+When the broadcast has no DVB-I list for some of its services (TP37,
+1067000.ts; not conformant), NippApp offers them in a list of its own,
+`/dvbi/nippapp_list.xml` ("Services without a broadcast list", provider
+"NippApp gateway"), made when requested from the channels no received list
+covers (`DVBNIP_ListUnlistedChannels`): each with its DASH and HLS
+instances, its channel name and the LCN allocated in the database. The entry
+points offer it too, merged like another network's, or on their own when no
+broadcast sent entry points at all. A content guide for it is Phase B.
 
 ## Request handling and on-demand tuning
 
@@ -478,11 +484,6 @@ Still to do:
 
 - One NIF: the NIP library keeps the last one received. It only adds
   transports to the database, so nothing is lost when it is replaced.
-- After a tuner is released, the first request for a service's manifest is
-  answered at once with the stored copy while the carrier is tuned again. Not
-  yet checked in a browser.
-- Broadcasts without a DVB-I list (TP37, `1067000.ts`): generate entry points
-  and a list from the SIF and the database (see Serving).
 - The admin endpoints `/api/status` and `/api/scan` (see Serving).
 - Large carousel files (SES's videos and PDFs): keep them on disk rather than
   in memory, answer byte range requests, and test with a capture that holds
@@ -630,23 +631,45 @@ Object carousels (A180 8.2.6):
 - `tools/asan-check.sh carousels` checks the list, an encoded name and the
   decoded schedule.
 
+Re-tune (2026-10-15):
+
+- After a tuner was released, the first request for a service's HLS media
+  playlist was answered at once with the copy kept from the last session,
+  listing segments from before the release that were still in the store: a
+  client joining then was sent into old content, then a gap. (The SES
+  capture also restarts on re-tune, moving its clock back a minute.)
+- DVBCore now doesn't serve a manifest or playlist that lists its segments
+  (an HLS media playlist, `#EXTINF`; a DASH `SegmentTimeline`) received
+  before its service last started (`received_time` on each file, never
+  cleared, refreshed when an unchanged copy arrives; `started_at` on each
+  service); the request waits for the fresh one, about 2 s for SES. Documents
+  that don't change (DASH `SegmentTemplate` manifests, HLS master playlists)
+  are served at once as before: Eutelsat sends its manifests only on the
+  bootstrap session, so they are never received again once a service plays.
+
+A list for broadcasts without one (2026-10-15): see Serving. TP37's s0 (HLS),
+s1 and B1 (DASH) are offered at LCNs 1000-1002, and dvbi-client-js loads
+them.
+
+`tools/asan-check.sh` has two more scenarios: `nolist` (TP37: the gateway's
+list offered, three services, their manifests served) and `retune` (SES: the
+HLS media playlist after a re-tune lists segments within 20 s of the clock).
+
 Still to do for milestone 5: two carriers at once with captures that share a
 clock (needs new captures).
 
-## Resume here (state at 2026-10-14)
+## Resume here (state at 2026-10-15)
 
-Milestones 1-4 and milestone 5's tuner contention, metadata change, several
-networks and lists, and DVB-HB handling are committed (NippApp ba57b7a,
-DVBCore 551d189).
+Committed: milestones 1-4 and milestone 5 up to object carousels and offline
+content (NippApp 271163a, DVBCore 91324f3). dvbi-client-js's file delivery
+(`src/service-list.js`, `test/parsers.test.js`) may still need committing.
 
-Not committed yet (fast 404, hidden carrier services, AddressSanitizer pass,
-object carousels, offline content in the player): in DVBCore
-`dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`, `dvbnip/src/nip_xml.c`,
-`dvbnip/src/nip_xml.h`; in NippApp `Makefile`, `inc/nippapp.h`,
-`src/encoding.c` (new), `src/httpd.c`, `src/registry.c`,
-`tools/asan-check.sh` (new), `player/player.html` and this file; in
-dvbi-client-js `src/service-list.js` and `test/parsers.test.js` (rebuild the
-player's copy with `tools/build-player.sh`).
+Not committed yet (re-tune, generated list): in DVBCore `dvbnip/inc/flute.h`,
+`dvbnip/inc/nip_mgr.h`, `dvbnip/src/flute.c`, `dvbnip/src/nip_mgr.c`; in
+NippApp `src/registry.c`, `tools/asan-check.sh` and this file. NippApp needs
+`make clean` after pulling, as `flute.h`'s file structure changed.
+`dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
+in DVBCore are local files, not to be committed.
 
 To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:
 
@@ -658,8 +681,15 @@ To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:
 then `./build/nippapp -d <dir> -s <file> --scan` and open
 `http://<ip>:8080/player/`. Add
 `11141 H 23500 pcap /home/jason/DTVkit/Streams/DvbNIP/2025-02-11_1min.pcap loop`
-for a third carrier, to see tuner contention.
+for a third carrier (tuner contention, SES's offline content and content
+guide), or use `11023 H 23500 pcap .../TP37_2min_231106.pcap loop` for a
+broadcast without a list. Run `tools/asan-check.sh` (about 20 minutes) after
+changes.
 
-Next: the robustness items in "Still to do" (the older manifest after a
-re-tune, a list for broadcasts without one, admin endpoints), then Phase B,
-whose content guide endpoint can now use SES's schedule. Run `tools/asan-check.sh` after changes.
+Milestone 5 still needs captures of two carriers with the same clock.
+
+Next, from "Still to do": the admin endpoints, then Phase B: entry point
+query filtering, mDNS, the content guide endpoint (SES's schedule is now
+received, decoded), civetweb, an independent DVB-I client; later, large
+carousel files (on disk, byte ranges; after civetweb, and needs a capture
+that holds them complete). Optional later: DVB-HB support (VandVD1).

@@ -5,7 +5,7 @@
 # at the end.
 #
 #   tools/asan-check.sh            all scenarios
-#   tools/asan-check.sh scans      one scenario: scans, networks, change or carousels
+#   tools/asan-check.sh scans      one scenario: scans, networks, change, carousels, nolist or retune
 #
 # CAPTURES (default ../Streams/DvbNIP next to the NippApp directory) is where the captures are, PORT
 # (default 18080) the HTTP port used, and KEEP=1 keeps the working directories and logs.
@@ -230,6 +230,51 @@ scenario_carousels()
 }
 
 # ---------------------------------------------------------------------------------------------------
+# TP37, a broadcast without DVB-I entry points or a list: the gateway's own list offers its services
+
+scenario_nolist()
+{
+   local dir="$work/nolist" conf="$work/nolist.conf" log="$work/nolist.log" code
+   echo "A broadcast without a DVB-I list (TP37)"
+   source_line 11023 H 23500 pcap TP37_2min_231106.pcap > "$conf"
+   start "$dir" "$conf" "$log" --scan || { stop "$log"; return; }
+   check "the entry points offer the gateway's list" \
+      "curl -s -m 10 '$base/dvbi/slep.xml' | grep -q 'nippapp_list.xml'"
+   check "the gateway's list has TP37's three services" \
+      "[ \$(curl -s -m 10 '$base/dvbi/nippapp_list.xml' | grep -o '<Service ' | wc -l) -eq 3 ]"
+   for path in /inverto.tv/s0/live.m3u8 /inverto.tv/s1/crits_linear.mpd /10.0.1.229/livesim/B1/Manifest.mpd; do
+      code=$(status "$path")
+      check "$path from the gateway's list plays ($code)" "[ $code = 200 ]"
+   done
+   stop "$log"
+}
+
+# ---------------------------------------------------------------------------------------------------
+# A re-tune: an HLS media playlist kept from before is not served; the fresh one lists segments
+# near the broadcast clock (SES, 2 s segments numbered by the UTC second / 2)
+
+scenario_retune()
+{
+   local dir="$work/retune" conf="$work/retune.conf" log="$work/retune.log" last now released
+   echo "Re-tune (SES)"
+   source_line 11141 H 23500 pcap 2025-02-11_1min.pcap > "$conf"
+   start "$dir" "$conf" "$log" --scan || { stop "$log"; return; }
+   released=$(grep -c "tuner 0: stopped" "$log")
+   check "the HLS media playlist plays" "[ \$(status /ses.com/livesim2/B1/playlist-SD.m3u8) = 200 ]"
+   for _ in $(seq 1 150); do
+      [ "$(grep -c "tuner 0: stopped" "$log")" -gt "$released" ] && break
+      sleep 1
+   done
+   sleep 3
+   curl -s -m 20 -o "$work/retune.m3u8" "$base/ses.com/livesim2/B1/playlist-SD.m3u8"
+   last=$(grep -o '[0-9]*\.m4s' "$work/retune.m3u8" | tail -1 | cut -d. -f1)
+   now=$(date -u -d "$(curl -s -m 5 "$base/time")" +%s 2>/dev/null || echo 0)
+   check "after a re-tune the playlist is fresh (last segment $((${last:-0} * 2 - now)) s from the clock)" \
+      "[ -n '$last' ] && [ \$(( ${last:-0} * 2 - $now )) -le 20 ] && [ \$(( $now - ${last:-0} * 2 )) -le 20 ]"
+   stop "$log"
+}
+
+# ---------------------------------------------------------------------------------------------------
 
 if curl -s -o /dev/null -m 2 "$base/time"; then
    echo "Port $port is in use; set PORT" >&2
@@ -243,10 +288,10 @@ fi
 echo "Building NippApp with AddressSanitizer"
 make clean > /dev/null && make ASAN=1 > "$work/build.log" 2>&1 || { echo "build failed, see $work/build.log"; KEEP=1; exit 1; }
 
-scenarios="${1:-scans networks change carousels}"
+scenarios="${1:-scans networks change carousels nolist retune}"
 for scenario in $scenarios; do
    case "$scenario" in
-      scans|networks|change|carousels) "scenario_$scenario" ;;
+      scans|networks|change|carousels|nolist|retune) "scenario_$scenario" ;;
       *) echo "unknown scenario $scenario" >&2; failures=$((failures + 1)) ;;
    esac
 done

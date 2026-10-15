@@ -26,6 +26,10 @@
  *          (SLEP_LOCATION, clause 8.1.7.3) are made from them: one network's as they are; with
  *          several, the first (by name) with every other one's provider offerings added, so a
  *          client is offered every network's service lists.
+ *
+ *          Channels that no broadcast DVB-I list covers (a broadcast without one, such as TP37) are
+ *          offered in a list NippApp makes, GENERATED_LIST_PATH, which the entry points then offer
+ *          too, from a provider named after the gateway.
  * @file    registry.c
  */
 
@@ -39,6 +43,7 @@
 #include <ctype.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <stdarg.h>
 #include <dirent.h>
 #include <libxml/parser.h>
 #include <libxml/tree.h>
@@ -58,6 +63,27 @@
 #define SLEP_DIR              REGISTRY_DIR "/slep"
 #define MAX_ENTITY_NAME       100
 #define MAX_SLEPS             32
+
+/* The list of channels no broadcast list covers, and how it is offered */
+#define GENERATED_LIST_PATH   "/dvbi/nippapp_list.xml"
+#define GENERATED_LIST_TYPE   "application/vnd.dvb.dvbisl+xml"
+#define GENERATED_LIST_ID     "tag:nippapp.dtvkit.org,2026:unlisted"
+#define GENERATED_PROVIDER    "NippApp gateway"
+#define GENERATED_LIST_NAME   "Services without a broadcast list"
+
+/* the entry points offering it, merged with the broadcast ones like another network's */
+static const char generated_slep[] =
+   "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+   "<ServiceListEntryPoints xmlns=\"urn:dvb:metadata:servicelistdiscovery:2024\""
+   " xmlns:dvbi-types=\"urn:dvb:metadata:servicediscovery-types:2023\" xml:lang=\"en\">"
+   "<ServiceListRegistryEntity regulatorFlag=\"false\"><Name>" GENERATED_PROVIDER "</Name></ServiceListRegistryEntity>"
+   "<ProviderOffering><Provider regulatorFlag=\"false\"><Name>" GENERATED_PROVIDER "</Name></Provider>"
+   "<ServiceListOffering regulatorListFlag=\"false\">"
+   "<dvbi-types:ServiceListName>" GENERATED_LIST_NAME "</dvbi-types:ServiceListName>"
+   "<dvbi-types:ServiceListURI contentType=\"application/xml\">"
+   "<dvbi-types:URI>http://dvb.gw" GENERATED_LIST_PATH "</dvbi-types:URI></dvbi-types:ServiceListURI>"
+   "<dvbi-types:ServiceListId>" GENERATED_LIST_ID "</dvbi-types:ServiceListId>"
+   "</ServiceListOffering></ProviderOffering></ServiceListEntryPoints>";
 #define TYPE_SUFFIX           ".nippapp-type"
 #define MAX_PATH_LEN          1024
 #define MAX_TYPE_LEN          256
@@ -91,6 +117,26 @@ static void KeepEntryPoints(const U8BIT *data, U32BIT len);
 static BOOLEAN EntityFileName(const U8BIT *data, U32BIT len, char *filename, size_t size);
 static BOOLEAN LoadEntryPoints(U8BIT **data, U32BIT *len, char **filetype);
 static int CompareNames(const void *a, const void *b);
+static BOOLEAN BuildGeneratedList(U8BIT **data, U32BIT *len);
+
+/*---local typedef structs for this file--------------------------------------*/
+
+/* A document being written */
+typedef struct
+{
+   char *text;
+   size_t len;
+   size_t size;
+   BOOLEAN failed;
+} S_TEXT;
+
+/* The generated list as it is built: its services, and its LCN table */
+typedef struct
+{
+   S_TEXT services;
+   S_TEXT lcns;
+   unsigned count;
+} S_GENERATED;
 
 /*---global function definitions---------------------------------------------*/
 
@@ -145,6 +191,23 @@ BOOLEAN REG_Load(const char *location, U8BIT **data, U32BIT *len, char **filetyp
    /* the gateway's entry points, made from every network's */
    if ((strcmp(location, SLEP_LOCATION) == 0) && LoadEntryPoints(data, len, filetype))
    {
+      return TRUE;
+   }
+
+   /* the list of channels no broadcast list covers */
+   if (strcmp(location, GENERATED_LIST_PATH) == 0)
+   {
+      if (!BuildGeneratedList(data, len))
+      {
+         return FALSE;
+      }
+      *filetype = strdup(GENERATED_LIST_TYPE);
+      if (*filetype == NULL)
+      {
+         free(*data);
+         *data = NULL;
+         return FALSE;
+      }
       return TRUE;
    }
 
@@ -331,14 +394,12 @@ static BOOLEAN LoadEntryPoints(U8BIT **data, U32BIT *len, char **filetype)
    int merged_len;
    U8BIT *content;
    U32BIT content_len;
+   BOOLEAN generated;
+   int total;
 
-   dir = opendir(SLEP_DIR);
-   if (dir == NULL)
-   {
-      return FALSE;
-   }
    count = 0;
-   while (((entry = readdir(dir)) != NULL) && (count < MAX_SLEPS))
+   dir = opendir(SLEP_DIR);
+   while ((dir != NULL) && ((entry = readdir(dir)) != NULL) && (count < MAX_SLEPS))
    {
       name_len = strlen(entry->d_name);
       if ((entry->d_name[0] != '.') && (name_len > 4) && (strcmp(entry->d_name + name_len - 4, ".xml") == 0))
@@ -350,25 +411,41 @@ static BOOLEAN LoadEntryPoints(U8BIT **data, U32BIT *len, char **filetype)
          }
       }
    }
-   closedir(dir);
-   if (count == 0)
+   if (dir != NULL)
+   {
+      closedir(dir);
+   }
+   qsort(names, count, sizeof(names[0]), CompareNames);
+
+   /* the gateway's own offering comes last, when it has channels to offer */
+   generated = BuildGeneratedList(&content, &content_len);
+   free(content);
+   total = count + (generated ? 1 : 0);
+   if (total == 0)
    {
       return FALSE;
    }
-   qsort(names, count, sizeof(names[0]), CompareNames);
 
    base = NULL;
    root = NULL;
    *data = NULL;
-   for (i = 0; i < count; i++)
+   for (i = 0; i < total; i++)
    {
-      snprintf(filename, sizeof(filename), "%s/%s", SLEP_DIR, names[i]);
-      content = ReadWholeFile(filename, &content_len);
+      if (i < count)
+      {
+         snprintf(filename, sizeof(filename), "%s/%s", SLEP_DIR, names[i]);
+         content = ReadWholeFile(filename, &content_len);
+      }
+      else
+      {
+         content = (U8BIT *)strdup(generated_slep);
+         content_len = (content == NULL) ? 0 : (U32BIT)strlen(generated_slep);
+      }
       if (content == NULL)
       {
          continue;
       }
-      if (count == 1)
+      if (total == 1)
       {
          /* one network: as it was broadcast */
          *data = content;
@@ -436,6 +513,138 @@ static BOOLEAN LoadEntryPoints(U8BIT **data, U32BIT *len, char **filetype)
       *data = NULL;
       return FALSE;
    }
+   return TRUE;
+}
+
+/* Appends to a document being written */
+static void Append(S_TEXT *t, const char *format, ...)
+{
+   va_list args;
+   char *bigger;
+   int n;
+
+   if (t->failed)
+   {
+      return;
+   }
+   for (;;)
+   {
+      va_start(args, format);
+      n = vsnprintf((t->text == NULL) ? NULL : t->text + t->len, t->size - t->len, format, args);
+      va_end(args);
+      if (n < 0)
+      {
+         t->failed = TRUE;
+         return;
+      }
+      if ((t->text != NULL) && ((size_t)n < t->size - t->len))
+      {
+         t->len += (size_t)n;
+         return;
+      }
+      bigger = (char *)realloc(t->text, t->size + (size_t)n + 4096);
+      if (bigger == NULL)
+      {
+         t->failed = TRUE;
+         return;
+      }
+      t->text = bigger;
+      t->size += (size_t)n + 4096;
+   }
+}
+
+/* Appends text, escaped for XML */
+static void AppendEscaped(S_TEXT *t, const char *text)
+{
+   for (; *text != '\0'; text++)
+   {
+      switch (*text)
+      {
+         case '&': Append(t, "&amp;"); break;
+         case '<': Append(t, "&lt;"); break;
+         case '>': Append(t, "&gt;"); break;
+         case '"': Append(t, "&quot;"); break;
+         default: Append(t, "%c", *text); break;
+      }
+   }
+}
+
+/* A channel no broadcast list covers: a Service with a DASH and/or an HLS instance, and its LCN */
+static void AddGeneratedChannel(void *user_data, const S_DVBNIP_CHANNEL *channel)
+{
+   S_GENERATED *g = (S_GENERATED *)user_data;
+   char id[64];
+
+   snprintf(id, sizeof(id), "tag:nippapp.dtvkit.org,2026:%u.%u.%u",
+      (unsigned)channel->onid, (unsigned)channel->tsid, (unsigned)channel->sid);
+
+   Append(&g->services, "<Service version=\"1\"><UniqueIdentifier>%s</UniqueIdentifier>", id);
+   if (channel->dash_path != NULL)
+   {
+      Append(&g->services, "<ServiceInstance priority=\"1\"><SourceType>urn:dvb:metadata:source:dvb-dash</SourceType>"
+         "<DASHDeliveryParameters><UriBasedLocation contentType=\"application/dash+xml\"><dvbi-types:URI>http://dvb.gw");
+      AppendEscaped(&g->services, (const char *)channel->dash_path);
+      Append(&g->services, "</dvbi-types:URI></UriBasedLocation></DASHDeliveryParameters></ServiceInstance>");
+   }
+   if (channel->hls_path != NULL)
+   {
+      Append(&g->services, "<ServiceInstance priority=\"%d\">"
+         "<IdentifierBasedDeliveryParameters contentType=\"application/vnd.apple.mpegurl\">http://dvb.gw",
+         (channel->dash_path != NULL) ? 2 : 1);
+      AppendEscaped(&g->services, (const char *)channel->hls_path);
+      Append(&g->services, "</IdentifierBasedDeliveryParameters></ServiceInstance>");
+   }
+   Append(&g->services, "<ServiceName>");
+   AppendEscaped(&g->services, (const char *)channel->name);
+   Append(&g->services, "</ServiceName><ProviderName>" GENERATED_PROVIDER "</ProviderName>"
+      "<ServiceType href=\"urn:dvb:metadata:cs:ServiceTypeCS:2019:linear\"/></Service>");
+
+   if (channel->lcn != 0)
+   {
+      Append(&g->lcns, "<LCN channelNumber=\"%u\" serviceRef=\"%s\" selectable=\"true\" visible=\"true\"/>",
+         (unsigned)channel->lcn, id);
+   }
+   g->count++;
+}
+
+/* The list of channels no broadcast DVB-I list covers; FALSE if there are none. The URIs use
+ * dvb.gw, as broadcast lists do, and are changed to the gateway's address when it is served. */
+static BOOLEAN BuildGeneratedList(U8BIT **data, U32BIT *len)
+{
+   S_GENERATED g;
+   S_TEXT doc;
+
+   *data = NULL;
+   *len = 0;
+   memset(&g, 0, sizeof(g));
+   DVBNIP_ListUnlistedChannels(&g, AddGeneratedChannel);
+   if ((g.count == 0) || g.services.failed || g.lcns.failed)
+   {
+      free(g.services.text);
+      free(g.lcns.text);
+      return FALSE;
+   }
+
+   memset(&doc, 0, sizeof(doc));
+   Append(&doc, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+      "<ServiceList xmlns=\"urn:dvb:metadata:servicediscovery:2024\""
+      " xmlns:dvbi-types=\"urn:dvb:metadata:servicediscovery-types:2023\""
+      " xml:lang=\"en\" id=\"" GENERATED_LIST_ID "\" version=\"1\">"
+      "<Name>" GENERATED_LIST_NAME "</Name><ProviderName>" GENERATED_PROVIDER "</ProviderName>");
+   if (g.lcns.len > 0)
+   {
+      Append(&doc, "<LCNTableList><LCNTable>%s</LCNTable></LCNTableList>", g.lcns.text);
+   }
+   Append(&doc, "%s</ServiceList>", g.services.text);
+   free(g.services.text);
+   free(g.lcns.text);
+   if (doc.failed)
+   {
+      free(doc.text);
+      return FALSE;
+   }
+   *data = (U8BIT *)doc.text;
+   *len = (U32BIT)doc.len;
    return TRUE;
 }
 

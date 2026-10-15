@@ -149,6 +149,17 @@ scenario_networks()
    check "SES gets 503 with both tuners in use ($code)" "[ $code = 503 ]"
    code=$(status "/dvb-hb/318_601_17702.mpd/?src=DVB-HB&pos=13&freq=11317")
    check "DVB-HB request gets 501 ($code)" "[ $code = 501 ]"
+   check "/api/status is JSON with three sources" \
+      "curl -s -m 10 '$base/api/status' | python3 -I -c 'import json,sys; sys.exit(len(json.load(sys.stdin)[\"sources\"]) != 3)'"
+   code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -X POST "$base/api/scan")
+   check "/api/scan starts a scan ($code)" "[ $code = 202 ]"
+   code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -X POST "$base/api/scan")
+   check "/api/scan while one runs is refused ($code)" "[ $code = 409 ]"
+   for _ in $(seq 1 200); do
+      curl -s -m 10 "$base/api/status" | grep -q '"running":false' && break
+      sleep 2
+   done
+   check "the scan asked for completes" "curl -s -m 10 '$base/api/status' | grep -q '\"running\":false,\"lastCompleted\":true'"
    code=$(curl -s -o /dev/null -m 20 -w '%{http_code} %{time_total}' "$base/materials/DVB-NIP_EW.jpg")
    check "a path no SIF lists gets 404 at once ($code s)" "[ '${code% *}' = 404 ] && awk 'BEGIN { exit !(${code#* } < 1) }'"
    stop "$log"

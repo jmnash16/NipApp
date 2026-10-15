@@ -232,6 +232,31 @@ BOOLEAN REG_Load(const char *location, U8BIT **data, U32BIT *len, char **filetyp
    return TRUE;
 }
 
+void REG_ListNetworks(void *user_data, void (*callback)(void *user_data, const char *name))
+{
+   DIR *dir;
+   struct dirent *entry;
+   char name[MAX_ENTITY_NAME + 8];
+   size_t len;
+
+   dir = opendir(SLEP_DIR);
+   if (dir == NULL)
+   {
+      return;
+   }
+   while ((entry = readdir(dir)) != NULL)
+   {
+      len = strlen(entry->d_name);
+      if ((entry->d_name[0] != '.') && (len > 4) && (len < sizeof(name)) && (strcmp(entry->d_name + len - 4, ".xml") == 0))
+      {
+         memcpy(name, entry->d_name, len - 4);
+         name[len - 4] = '\0';
+         callback(user_data, name);
+      }
+   }
+   closedir(dir);
+}
+
 /*---local function definitions-----------------------------------------------*/
 
 /* Called by the NIP library, with its file store locked, for each file it stores. A DVB-I

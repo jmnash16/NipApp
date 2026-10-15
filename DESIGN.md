@@ -90,7 +90,8 @@ NippApp/
   inc/
     nippapp.h            interfaces between NippApp's own modules
   src/
-    main.c               options, startup, main loop, shutdown
+    main.c               options, startup, main loop (runs scans asked for), shutdown
+    admin.c              /api/status JSON
     events.c             DVBCore event handler (logging for now)
     search.c             first-run setup (country, satellite/LNB records) and scans
     registry.c           keeps every DVB-I document received on disk (query filtering: Phase B)
@@ -181,7 +182,7 @@ is always the broadcast path.
 | `/dvbi/nippapp_list.xml` | a DVB-I list of the services no broadcast list covers (see below), offered in the entry points when there are any |
 | `/time` | the NIP wall clock (8.6.3) |
 | any path with `src=DVB-HB` in its query | 501 Not Implemented: a TS broadcast service for a DVB-HB gateway to re-package as DASH (Annex F), which NippApp can't do |
-| `/api/status`, `/api/scan` | admin only: sources, tuners, sessions, store usage; start a rescan. The player never uses these. |
+| `/api/status` (GET), `/api/scan` (POST) | admin only: JSON of the version, uptime, scan state, broadcast time, sources, tuners, NIP streams and the services being received on each, file store use, channel count and the networks whose entry points are kept; start a rescan (202, or 409 while one runs). Answered to this machine only (403 otherwise) unless `--admin-from-any` (`-A`). The player never uses these. |
 
 The gateway's address in rewritten URLs is a literal IP address, not a `.local`
 name: `dvbi-client-js` allows plain HTTP only to private IP addresses and
@@ -484,7 +485,6 @@ Still to do:
 
 - One NIF: the NIP library keeps the last one received. It only adds
   transports to the database, so nothing is lost when it is replaced.
-- The admin endpoints `/api/status` and `/api/scan` (see Serving).
 - Large carousel files (SES's videos and PDFs): keep them on disk rather than
   in memory, answer byte range requests, and test with a capture that holds
   them complete. Optionally answer 503 with `Retry-After` (from the
@@ -655,19 +655,35 @@ them.
 list offered, three services, their manifests served) and `retune` (SES: the
 HLS media playlist after a re-tune lists segments within 20 s of the clock).
 
+Admin API (2026-10-15): `/api/status` and `/api/scan` (see Serving). A scan
+asked for runs on the main thread, as the first one does, and can run while
+services play (tested with A2 playing: every source searched, 12 channels,
+all three carriers playing afterwards). New DVBCore calls
+`DVBNIP_ListStreams` and `DVBNIP_GetStoreUsage`; the file tuner reports each
+tuner's state (`TUN_GetTunerState`). `tools/asan-check.sh networks` checks
+the status JSON, 202 and then 409 from `/api/scan`, and that the scan
+completes. That rescan found another DVBCore leak: deleting a service didn't
+free the PMT it keeps for CA systems (`pmt_data`, `ap_dbdef.c`); fixed.
+
 Still to do for milestone 5: two carriers at once with captures that share a
 clock (needs new captures).
 
 ## Resume here (state at 2026-10-15)
 
-Committed: milestones 1-4 and milestone 5 up to object carousels and offline
-content (NippApp 271163a, DVBCore 91324f3). dvbi-client-js's file delivery
-(`src/service-list.js`, `test/parsers.test.js`) may still need committing.
+Committed: milestones 1-4 and milestone 5 up to the re-tune fix and the
+generated list (NippApp 2d87950, DVBCore 48abd27).
 
-Not committed yet (re-tune, generated list): in DVBCore `dvbnip/inc/flute.h`,
-`dvbnip/inc/nip_mgr.h`, `dvbnip/src/flute.c`, `dvbnip/src/nip_mgr.c`; in
-NippApp `src/registry.c`, `tools/asan-check.sh` and this file. NippApp needs
-`make clean` after pulling, as `flute.h`'s file structure changed.
+Not committed yet:
+
+- Admin API: in DVBCore `dvb/src/ap_dbdef.c` (the `pmt_data` leak),
+  `dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`; in NippApp `Makefile`,
+  `inc/nippapp.h`, `platform/hw/inc/nipphw.h`, `platform/hw/src/stbhwtun.c`,
+  `src/admin.c` (new), `src/httpd.c`, `src/main.c`, `src/registry.c`,
+  `tools/asan-check.sh` and this file.
+- dvbi-client-js (`~/dvbi-client-js`, remote `DTVKit/dvbi-client-js`):
+  `src/service-list.js`, `test/parsers.test.js` (file deliveries, which the
+  player needs for SES's offline content).
+
 `dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
 in DVBCore are local files, not to be committed.
 
@@ -688,7 +704,7 @@ changes.
 
 Milestone 5 still needs captures of two carriers with the same clock.
 
-Next, from "Still to do": the admin endpoints, then Phase B: entry point
+Next: Phase B: entry point
 query filtering, mDNS, the content guide endpoint (SES's schedule is now
 received, decoded), civetweb, an independent DVB-I client; later, large
 carousel files (on disk, byte ranges; after civetweb, and needs a capture

@@ -16,7 +16,11 @@
 #ifndef _NIPPAPP_H
 #define _NIPPAPP_H
 
+#include <time.h>
+
 #include "techtype.h"
+
+#define NIPPAPP_VERSION    "0.1.0"
 
 /**
  * @brief   DVBCore event handler, registered with APP_InitialiseDVB
@@ -48,6 +52,21 @@ BOOLEAN NIPPAPP_SetupCountry(const char *country);
 BOOLEAN NIPPAPP_Scan(void);
 
 /**
+ * @brief   Asks the main thread to scan every source again (admin API)
+ * @return  FALSE if a scan is already running or asked for
+ */
+BOOLEAN NIPPAPP_RequestScan(void);
+
+/**
+ * @brief   The scan state, for status
+ * @param   running returns TRUE while a scan is running or asked for
+ * @param   completed returns TRUE if the last scan completed
+ * @param   finished returns when the last scan finished, or 0 if none has
+ * @param   since returns when NippApp started
+ */
+void NIPPAPP_GetScanState(BOOLEAN *running, BOOLEAN *completed, time_t *finished, time_t *since);
+
+/**
  * @brief   Prints the services in the database
  */
 void NIPPAPP_PrintServices(void);
@@ -65,6 +84,24 @@ BOOLEAN HTTPD_Start(const char *port, const char *player_dir);
  * @brief   Stops the HTTP server, waiting for requests in progress to finish
  */
 void HTTPD_Stop(void);
+
+/**
+ * @brief   Whether the admin API (/api/status, /api/scan) answers any address, or only this machine
+ *          (the default). Set before HTTPD_Start.
+ */
+void HTTPD_AllowAdminFromAny(BOOLEAN any);
+
+/**
+ * @brief   The gateway's state as JSON, for /api/status: version, uptime, scan, sources, tuners,
+ *          NIP streams and the services being received, file store, wall clock, networks
+ * @return  the JSON, to be freed with free(), or NULL
+ */
+char* ADMIN_StatusJson(void);
+
+/**
+ * @brief   Calls back with the name of each network whose entry points the registry keeps
+ */
+void REG_ListNetworks(void *user_data, void (*callback)(void *user_data, const char *name));
 
 /**
  * @brief   Starts the registry: from now on, every DVB-I document the NIP library receives is

@@ -252,6 +252,24 @@ const S_SOURCE* TUN_GetSource(U16BIT index)
    return (index < num_sources) ? &sources[index] : NULL;
 }
 
+U8BIT TUN_GetNumTuners(void)
+{
+   return num_paths;
+}
+
+BOOLEAN TUN_GetTunerState(U8BIT path, BOOLEAN *locked, S32BIT *source)
+{
+   if (path >= num_paths)
+   {
+      return FALSE;
+   }
+   pthread_mutex_lock(&tuners[path].mutex);
+   *locked = tuners[path].locked;
+   *source = (tuners[path].source == NO_SOURCE) ? -1 : (S32BIT)tuners[path].source;
+   pthread_mutex_unlock(&tuners[path].mutex);
+   return TRUE;
+}
+
 BOOLEAN TUN_GetBroadcastTime(double *utc)
 {
    BOOLEAN valid;

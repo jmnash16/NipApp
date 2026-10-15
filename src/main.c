@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <limits.h>
+#include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
 #include <stdio.h>
@@ -38,7 +39,6 @@
 #include "nippapp.h"
 
 /*---constant definitions for this file---------------------------------------*/
-#define NIPPAPP_VERSION    "0.1.0"
 #define DEFAULT_SOURCES    "sources.conf"
 #define DEFAULT_COUNTRY    "gbr"
 #define DEFAULT_PORT       "8080"
@@ -53,6 +53,14 @@
 static sem_t stop_sem;
 static volatile sig_atomic_t stop_signal = 0;
 
+/* Scans asked for through the admin API run on the main thread, which also runs the first one */
+static pthread_mutex_t scan_mutex = PTHREAD_MUTEX_INITIALIZER;
+static BOOLEAN scan_requested = FALSE;
+static BOOLEAN scan_running = FALSE;
+static BOOLEAN scan_completed = FALSE;
+static time_t scan_finished = 0;
+static time_t started = 0;
+
 /*---local function prototypes for this file----------------------------------*/
 static void Usage(const char *name);
 static void SignalHandler(int sig);
@@ -60,6 +68,53 @@ static BOOLEAN InstallSignalHandlers(void);
 static BOOLEAN FindPlayerDir(const char *given, const char *argv0, char *dir, size_t size);
 
 /*---global function definitions---------------------------------------------*/
+
+BOOLEAN NIPPAPP_RequestScan(void)
+{
+   BOOLEAN accepted;
+
+   pthread_mutex_lock(&scan_mutex);
+   accepted = !scan_running && !scan_requested;
+   if (accepted)
+   {
+      scan_requested = TRUE;
+   }
+   pthread_mutex_unlock(&scan_mutex);
+   return accepted;
+}
+
+void NIPPAPP_GetScanState(BOOLEAN *running, BOOLEAN *completed, time_t *finished, time_t *since)
+{
+   pthread_mutex_lock(&scan_mutex);
+   *running = scan_running || scan_requested;
+   *completed = scan_completed;
+   *finished = scan_finished;
+   pthread_mutex_unlock(&scan_mutex);
+   *since = started;
+}
+
+/* Runs a scan of every source, noting its state for the admin API */
+static void RunScan(void)
+{
+   BOOLEAN completed;
+
+   pthread_mutex_lock(&scan_mutex);
+   scan_requested = FALSE;
+   scan_running = TRUE;
+   pthread_mutex_unlock(&scan_mutex);
+
+   completed = NIPPAPP_Scan();
+   if (completed)
+   {
+      NIPPAPP_PrintServices();
+   }
+
+   pthread_mutex_lock(&scan_mutex);
+   scan_running = FALSE;
+   scan_completed = completed;
+   scan_finished = time(NULL);
+   pthread_mutex_unlock(&scan_mutex);
+}
 
 BOOLEAN NIPPAPP_StopRequested(U32BIT wait_ms)
 {
@@ -92,6 +147,7 @@ int main(int argc, char *argv[])
       {"country", required_argument, NULL, 'c'},
       {"port", required_argument, NULL, 'p'},
       {"player-dir", required_argument, NULL, 'P'},
+      {"admin-from-any", no_argument, NULL, 'A'},
       {"help", no_argument, NULL, 'h'},
       {"version", no_argument, NULL, 'V'},
       {NULL, 0, NULL, 0}
@@ -104,12 +160,13 @@ int main(int argc, char *argv[])
    const char *player_arg = NULL;
    char player_dir[PATH_MAX];
    BOOLEAN force_scan = FALSE;
+   BOOLEAN admin_from_any = FALSE;
    int opt;
 
    /* Line-buffered output, so that progress shows when the output goes to a file */
    setvbuf(stdout, NULL, _IOLBF, 0);
 
-   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:P:hV", long_opts, NULL)) != -1)
+   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:P:AhV", long_opts, NULL)) != -1)
    {
       switch (opt)
       {
@@ -130,6 +187,9 @@ int main(int argc, char *argv[])
             break;
          case 'P':
             player_arg = optarg;
+            break;
+         case 'A':
+            admin_from_any = TRUE;
             break;
          case 'V':
             printf("NippApp %s\n", NIPPAPP_VERSION);
@@ -178,6 +238,7 @@ int main(int argc, char *argv[])
    }
 
    printf("NippApp %s starting\n", NIPPAPP_VERSION);
+   started = time(NULL);
 
    /* The tuner reads the sources when DVBCore initialises it */
    if (!TUN_LoadSources(sources_path))
@@ -202,20 +263,30 @@ int main(int argc, char *argv[])
 
    if (force_scan || (ADB_GetNumServicesInList(ADB_SERVICE_LIST_ALL, FALSE) == 0))
    {
-      if (NIPPAPP_Scan())
-      {
-         NIPPAPP_PrintServices();
-      }
+      RunScan();
    }
 
+   HTTPD_AllowAdminFromAny(admin_from_any);
    if (!NIPPAPP_StopRequested(0) && !HTTPD_Start(port, (player_dir[0] != '\0') ? player_dir : NULL))
    {
       return 1;
    }
 
-   /* Everything else runs on DVBCore's tasks; the main thread waits for a stop request */
+   /* Everything else runs on DVBCore's tasks; the main thread runs scans asked for through the
+    * admin API, and waits for a stop request */
    while (!NIPPAPP_StopRequested(1000))
    {
+      pthread_mutex_lock(&scan_mutex);
+      if (scan_requested)
+      {
+         pthread_mutex_unlock(&scan_mutex);
+         printf("NippApp: scan requested\n");
+         RunScan();
+      }
+      else
+      {
+         pthread_mutex_unlock(&scan_mutex);
+      }
    }
 
    HTTPD_Stop();
@@ -241,6 +312,8 @@ static void Usage(const char *name)
       "  -c, --country <code>   ISO 3166 country, which decides LCN allocation (default %s)\n"
       "  -p, --port <port>      HTTP port (default %s)\n"
       "  -P, --player-dir <dir> web player files (default: player/ next to build/)\n"
+      "  -A, --admin-from-any   answer /api/status and /api/scan from any address, not only\n"
+      "                         this machine\n"
       "  -h, --help             show this help\n"
       "  -V, --version          show the version\n", name, DEFAULT_SOURCES, DEFAULT_COUNTRY, DEFAULT_PORT);
 }

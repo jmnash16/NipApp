@@ -85,6 +85,9 @@ static const char application_dash_xml[] = "application/dash+xml";
 static const char dvb_gw_prefix[] = "http://dvb.gw/";
 
 /* Extensions of broadcast files worth waiting for */
+/* The admin API answers this machine only, unless --admin-from-any */
+static BOOLEAN admin_from_any = FALSE;
+
 /*---local typedef structs for this file--------------------------------------*/
 typedef struct
 {
@@ -909,13 +912,73 @@ static void SendNoDvbHb(struct mg_connection *conn)
    SendResponse(conn, 501, "Not Implemented", "text/plain", "Cache-Control: no-store\r\n", text, strlen(text));
 }
 
+void HTTPD_AllowAdminFromAny(BOOLEAN any)
+{
+   admin_from_any = any;
+}
+
+/* The admin API: /api/status (GET) and /api/scan (POST), answered to this machine only unless
+ * --admin-from-any is given */
+static void SendAdmin(struct mg_connection *conn, const struct mg_request_info *request_info)
+{
+   const char *method = request_info->request_method;
+   const char *uri = request_info->uri;
+   char *json;
+
+   if (!admin_from_any && (((unsigned long)request_info->remote_ip >> 24) != 127))
+   {
+      SendResponse(conn, 403, "Forbidden", "text/plain", "Cache-Control: no-store\r\n", NULL, 0);
+   }
+   else if (strcmp(uri, "/api/status") == 0)
+   {
+      if ((strcmp(method, "GET") != 0) && (strcmp(method, "HEAD") != 0))
+      {
+         SendResponse(conn, 405, "Method Not Allowed", "text/plain", "Allow: GET, HEAD\r\n", NULL, 0);
+         return;
+      }
+      json = ADMIN_StatusJson();
+      if (json == NULL)
+      {
+         SendResponse(conn, 500, "Internal Server Error", "text/plain", NULL, NULL, 0);
+         return;
+      }
+      SendResponse(conn, 200, "OK", "application/json", "Cache-Control: no-store\r\n", json, strlen(json));
+      free(json);
+   }
+   else if (strcmp(uri, "/api/scan") == 0)
+   {
+      if (strcmp(method, "POST") != 0)
+      {
+         SendResponse(conn, 405, "Method Not Allowed", "text/plain", "Allow: POST\r\n", NULL, 0);
+      }
+      else if (NIPPAPP_RequestScan())
+      {
+         SendResponse(conn, 202, "Accepted", "application/json", "Cache-Control: no-store\r\n",
+            "{\"scan\":\"started\"}\n", 19);
+      }
+      else
+      {
+         SendResponse(conn, 409, "Conflict", "application/json", "Cache-Control: no-store\r\n",
+            "{\"scan\":\"running\"}\n", 19);
+      }
+   }
+   else
+   {
+      SendNotFound(conn);
+   }
+}
+
 static int BeginRequestHandler(struct mg_connection *conn)
 {
    const struct mg_request_info *request_info = mg_get_request_info(conn);
    const char *uri = request_info->uri;
    char path[MAX_PATH_LEN * 3];
 
-   if ((strcmp(request_info->request_method, "GET") != 0) && (strcmp(request_info->request_method, "HEAD") != 0))
+   if (strncmp(uri, "/api/", 5) == 0)
+   {
+      SendAdmin(conn, request_info);
+   }
+   else if ((strcmp(request_info->request_method, "GET") != 0) && (strcmp(request_info->request_method, "HEAD") != 0))
    {
       SendResponse(conn, 405, "Method Not Allowed", "text/plain", "Allow: GET, HEAD\r\n", NULL, 0);
    }

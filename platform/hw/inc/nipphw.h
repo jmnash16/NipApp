@@ -70,6 +70,20 @@ const S_SOURCE* TUN_GetSource(U16BIT index);
 BOOLEAN TUN_GetBroadcastTime(double *utc);
 
 /**
+ * @brief   Returns the number of tuners
+ */
+U8BIT TUN_GetNumTuners(void);
+
+/**
+ * @brief   Returns a tuner's state, for status
+ * @param   path tuner path, 0 to TUN_GetNumTuners() - 1
+ * @param   locked returns TRUE if it is locked to a source
+ * @param   source returns the index of the source it is fed from, or -1 if none
+ * @return  FALSE if there is no such tuner
+ */
+BOOLEAN TUN_GetTunerState(U8BIT path, BOOLEAN *locked, S32BIT *source);
+
+/**
  * @brief   Passes TS packets from a tuner to every demux whose source is that tuner.
  *          Called on the tuner's feeder thread.
  * @param   tuner_path tuner the packets were received on

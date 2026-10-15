@@ -667,7 +667,7 @@ static U32BIT FixAACConfig(U8BIT *data, U32BIT len)
 /* prefer_registry: serve the registry's copy before the NIP library's. For the entry points,
  * which the registry keeps whatever location they came with, the NIP library may hold an older
  * network's under the URN. */
-static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefer_registry)
+static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefer_registry, const char *query)
 {
    U8BIT *data;
    U8BIT *filetype;
@@ -744,6 +744,23 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
    }
    else if (REG_IsDvbiType((const char *)filetype))
    {
+      /* entry points asked for with query parameters are filtered (8.1.7.4) */
+      if ((query != NULL) && (query[0] != '\0') &&
+          (strncasecmp((const char *)filetype, "application/xml+dvb-i-slep", 26) == 0) &&
+          REG_FilterEntryPoints(data, len, query, &decoded, &decoded_len))
+      {
+         if (data_malloced)
+         {
+            free(data);
+         }
+         else
+         {
+            STB_FreeMemory(data);
+         }
+         data = decoded;
+         len = decoded_len;
+         data_malloced = TRUE;
+      }
       body = RewriteDvbGw(conn, (const char *)data, &len);
       if (body != NULL)
       {
@@ -968,6 +985,56 @@ static void SendAdmin(struct mg_connection *conn, const struct mg_request_info *
    }
 }
 
+/* A content guide query to a content guide manifest's URL (Annex D.6.2); FALSE if it isn't one */
+static BOOLEAN SendGuide(struct mg_connection *conn, const char *path, const char *query)
+{
+   char *body, *rewritten;
+   char headers[128];
+   U32BIT len;
+   int status;
+
+   if ((query == NULL) || (strstr(query, "sid=") == NULL))
+   {
+      return FALSE;
+   }
+   status = GUIDE_Query(path, query, &body, &len);
+   switch (status)
+   {
+      case GUIDE_NOT_A_QUERY:
+         return FALSE;
+      case 200:
+         /* its images are on dvb.gw too */
+         rewritten = RewriteDvbGw(conn, body, &len);
+         free(body);
+         if (rewritten == NULL)
+         {
+            SendResponse(conn, 500, "Internal Server Error", "text/plain", NULL, NULL, 0);
+         }
+         else
+         {
+            SendResponse(conn, 200, "OK", "application/xml", "Cache-Control: no-store\r\n", rewritten, len);
+            free(rewritten);
+         }
+         break;
+      case 400:
+         SendResponse(conn, 400, "Bad Request", "text/plain", "Cache-Control: no-store\r\n", NULL, 0);
+         break;
+      case 503:
+         snprintf(headers, sizeof(headers),
+            "Cache-Control: no-store\r\nRetry-After: %d\r\nAccess-Control-Expose-Headers: Retry-After\r\n",
+            GUIDE_RetryAfter());
+         SendResponse(conn, 503, "Service Unavailable", "text/plain", headers, NULL, 0);
+         break;
+      case 404:
+         SendNotFound(conn);
+         break;
+      default:
+         SendResponse(conn, 500, "Internal Server Error", "text/plain", NULL, NULL, 0);
+         break;
+   }
+   return TRUE;
+}
+
 static int BeginRequestHandler(struct mg_connection *conn)
 {
    const struct mg_request_info *request_info = mg_get_request_info(conn);
@@ -992,7 +1059,7 @@ static int BeginRequestHandler(struct mg_connection *conn)
    }
    else if (strcmp(uri, SLEP_PATH) == 0)
    {
-      SendFile(conn, SLEP_LOCATION, TRUE);
+      SendFile(conn, SLEP_LOCATION, TRUE, request_info->query_string);
    }
    else if (strcmp(uri, "/player") == 0)
    {
@@ -1009,7 +1076,10 @@ static int BeginRequestHandler(struct mg_connection *conn)
    }
    else if (EncodePath(uri, path, sizeof(path)))
    {
-      SendFile(conn, path, FALSE);
+      if (!SendGuide(conn, path, request_info->query_string))
+      {
+         SendFile(conn, path, FALSE, request_info->query_string);
+      }
    }
    else
    {

@@ -95,7 +95,7 @@ NippApp/
     events.c             DVBCore event handler (logging for now)
     search.c             first-run setup (country, satellite/LNB records) and scans
     registry.c           keeps every DVB-I document received on disk (query filtering: Phase B)
-    guide.c              content guide endpoint (Phase 5)
+    guide.c              content guide endpoint (Annex D.6.2)
     httpd.c              HTTP server: broadcast files, DVB-I rewriting, /time, /dvbi/slep.xml (milestone 4)
     mdns.c               DNS-SD/mDNS announcement (Phase B)
   platform/
@@ -176,7 +176,7 @@ is always the broadcast path.
 | `/` , `/player` | the web player |
 | broadcast path of the entry points file (`application/xml+dvb-i-slep`) | the service list registry: the broadcast entry points, filtered by TargetCountry, regulatorListFlag, Language, Genre and ProviderName when queried (8.1.7.4); plain and `[]` parameter names both accepted |
 | broadcast path of each DVB-I list | the list as broadcast, with `http://dvb.gw/` changed to the gateway's address (Annex F.2.1) |
-| broadcast path of the content guide manifest | the content guide endpoint: `?sid&start&end`, `?sid&now_next=true` (Annex D.6.2; Phase 5) |
+| broadcast path of the content guide manifest | the content guide endpoint: `?sid&start&end[&inclusive=true]`, `?sid&now_next=true` (Annex D.6.2): a TVAMain of the service's events and programmes; 503 with `Retry-After` while the guide is still being received; 400 for a bad query |
 | any other broadcast path | manifests, segments and other files from the file store |
 | `/dvbi/slep.xml` | the DVB-I service list entry points, which the broadcast identifies only by URN (`urn:dvb:metadata:nativeip:dvb-i-slep`, 8.2.5.1), so the gateway chooses the URL (8.1.7.3); with several networks, one document offering every network's lists |
 | `/dvbi/nippapp_list.xml` | a DVB-I list of the services no broadcast list covers (see below), offered in the entry points when there are any |
@@ -491,7 +491,7 @@ Still to do:
   carousel's `targetAcquisitionLatency`) for a carousel file still on its
   way, rather than 404 after 8 s.
 - VandVD1 (DVB-HB) and OTT instances can't be played through the gateway.
-- Entry point query filtering, and the move to civetweb.
+- The move to civetweb.
 
 ## Milestone 5 progress
 
@@ -668,18 +668,64 @@ free the PMT it keeps for CA systems (`pmt_data`, `ap_dbdef.c`); fixed.
 Still to do for milestone 5: two carriers at once with captures that share a
 clock (needs new captures).
 
+## Phase B progress
+
+Entry point query filtering (8.1.7.4, 2026-10-15): `/dvbi/slep.xml` (and a
+broadcast entry points file at its own path) filtered by `TargetCountry`,
+`Language`, `Genre`, `ProviderName` and `Delivery` (each as `Name` or
+`Name[]`, repeatable) and `regulatorListFlag=true`, as dvbi-client-js sends
+them (`REG_FilterEntryPoints`, `src/registry.c`). Every parameter given must
+match, any of its values; providers are matched by `Provider/Name`, ignoring
+case and surrounding white space; the rest by each `ServiceListOffering`'s
+`TargetCountry` codes, `Language` (a tag matches a more or less specific form
+of itself, `en` with `en-GB`), `Genre` hrefs, `Delivery` children
+(`DASHDelivery` is `dvb-dash` or `dash`, ...) and `regulatorListFlag`; a
+provider left with no offering is removed; unknown parameters are ignored.
+Assumed, to check against TS 103 770: an offering that doesn't declare a
+property that is asked for doesn't match (e.g. Inverto's list, which has no
+TargetCountry, isn't returned for `TargetCountry=...`). Tested by hand and
+with dvbi-client-js's discovery parameters; `tools/asan-check.sh networks`
+checks a provider and a country query.
+
+Content guide endpoint (Annex D, 2026-10-15): a DVB-I client asks the
+service list's `ScheduleInfoEndpoint`, which for a broadcast list is the NIP
+Content Guide Manifest (`http://dvb.gw/ses.com/dvbi/cg/manifest.xml`), with
+`?sid=<ServiceIDRef>&start=<s>&end=<s>` or `?sid=...&now_next=true`
+(`src/guide.c`). The manifest's `GuideSession` `TagRef`s are the tags of the
+object carousels carrying the guide (SES: `/ses.com/dvbi/cg/CoreSet`, a gzip
+TV-Anytime schedule of 534 programmes over four weeks, and its images); the
+stream's NIP Service Guide Manifest (`urn:dvb:metadata:nativeip:ServiceGuide`)
+names the carousels with now and next (`/ses.com/dvbi/sg/CoreSet`). Both
+carry TVAMain documents already in DVB-I's form, so the answer is a TVAMain
+with the service's events from all of them (sorted, the same event in both
+once) and their ProgramInformation, its `dvb.gw` URLs rewritten. A schedule
+query returns the events starting in `[start, end)`, with `inclusive=true`
+also the one under way at `start`; now and next are the event on at the
+broadcast time and the one after it. The documents' files come from the
+carousels (new DVBCore call `DVBNIP_ListCarouselResources`), decoded and kept
+parsed until their content changes; asking for them tunes and joins, and
+until they are here the answer is 503 with `Retry-After: 10`. Tested by hand
+(now and next at 14:21 broadcast time: "Ingo Thiel - Briefe aus dem
+Jenseits", then "Leben mit Vulkanen"; seven programmes 18:00-24:00) and with
+dvbi-client-js's `epg.getEvents`. dvbi-client-js chooses now and next by its
+own clock, so with these 2025 recordings its `getNowNext` finds nothing
+current, though the gateway answers; live reception has no such gap.
+Assumed, to check against TS 103 770: the window rule above, and answering an
+unknown `sid` with an empty schedule (200). `tools/asan-check.sh carousels`
+checks now and next, a window and a bad query.
+
 ## Resume here (state at 2026-10-15)
 
-Committed: milestones 1-4 and milestone 5 up to the re-tune fix and the
-generated list (NippApp 2d87950, DVBCore 48abd27).
+Committed: milestones 1-4, milestone 5 and the admin API (NippApp f48cdf2,
+DVBCore 7f62ab0).
 
 Not committed yet:
 
-- Admin API: in DVBCore `dvb/src/ap_dbdef.c` (the `pmt_data` leak),
-  `dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`; in NippApp `Makefile`,
-  `inc/nippapp.h`, `platform/hw/inc/nipphw.h`, `platform/hw/src/stbhwtun.c`,
-  `src/admin.c` (new), `src/httpd.c`, `src/main.c`, `src/registry.c`,
-  `tools/asan-check.sh` and this file.
+- Phase B so far, entry point query filtering and the content guide
+  endpoint: in DVBCore `dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`
+  (`DVBNIP_ListCarouselResources`); in NippApp `Makefile`, `inc/nippapp.h`,
+  `src/guide.c` (new), `src/httpd.c`, `src/registry.c`,
+  `tools/asan-check.sh` and this file. `tools/asan-check.sh`: 57 of 57.
 - dvbi-client-js (`~/dvbi-client-js`, remote `DTVKit/dvbi-client-js`):
   `src/service-list.js`, `test/parsers.test.js` (file deliveries, which the
   player needs for SES's offline content).
@@ -704,8 +750,6 @@ changes.
 
 Milestone 5 still needs captures of two carriers with the same clock.
 
-Next: Phase B: entry point
-query filtering, mDNS, the content guide endpoint (SES's schedule is now
-received, decoded), civetweb, an independent DVB-I client; later, large
+Next: the rest of Phase B: mDNS, civetweb, an independent DVB-I client; later, large
 carousel files (on disk, byte ranges; after civetweb, and needs a capture
 that holds them complete). Optional later: DVB-HB support (VandVD1).

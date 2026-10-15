@@ -99,6 +99,43 @@ void HTTPD_AllowAdminFromAny(BOOLEAN any);
 char* ADMIN_StatusJson(void);
 
 /**
+ * @brief   Filters service list entry points by the DVB-I query parameters (TS 103 876 clause
+ *          8.1.7.4): TargetCountry, Language, Genre, ProviderName, Delivery, each as Name or
+ *          Name[] and repeatable, and regulatorListFlag=true. Every parameter given must match,
+ *          any of its values; an offering that doesn't declare a property asked for doesn't match,
+ *          and a provider left with no offerings is removed.
+ * @param   data the entry points
+ * @param   len their length
+ * @param   query the request's query string
+ * @param   filtered returns the filtered entry points, to be freed with free()
+ * @param   filtered_len returns their length
+ * @return  FALSE if the query has no parameter that filters, or the entry points don't parse
+ */
+BOOLEAN REG_FilterEntryPoints(const U8BIT *data, U32BIT len, const char *query, U8BIT **filtered,
+   U32BIT *filtered_len);
+
+/* GUIDE_Query: the request isn't a content guide query; serve the path as a file */
+#define GUIDE_NOT_A_QUERY     (-1)
+
+/**
+ * @brief   Answers a DVB-I content guide query (TS 103 876 clause D.6.2) made to a NIP Content
+ *          Guide Manifest's URL: ?sid=<ServiceIDRef>&start=<s>&end=<s>[&inclusive=true] or
+ *          ?sid=<ServiceIDRef>&now_next=true
+ * @param   path the request path (the manifest's broadcast path)
+ * @param   query the query string
+ * @param   body returns the answer, a TVAMain document, to be freed with free()
+ * @param   len returns its length
+ * @return  GUIDE_NOT_A_QUERY, or the HTTP status: 200, 400 (bad parameters), 404 (no guide), 503
+ *          (the guide is still being received; try again after GUIDE_RetryAfter() seconds)
+ */
+int GUIDE_Query(const char *path, const char *query, char **body, U32BIT *len);
+
+/**
+ * @brief   Seconds to give in Retry-After when GUIDE_Query answers 503
+ */
+int GUIDE_RetryAfter(void);
+
+/**
  * @brief   Calls back with the name of each network whose entry points the registry keeps
  */
 void REG_ListNetworks(void *user_data, void (*callback)(void *user_data, const char *name));

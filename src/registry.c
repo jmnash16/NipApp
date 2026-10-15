@@ -232,6 +232,369 @@ BOOLEAN REG_Load(const char *location, U8BIT **data, U32BIT *len, char **filetyp
    return TRUE;
 }
 
+/* Entry point query parameters (TS 103 876 clause 8.1.7.4, TS 103 770): each may be given as
+ * Name or Name[], more than once */
+enum { Q_COUNTRY, Q_LANGUAGE, Q_GENRE, Q_PROVIDER, Q_DELIVERY, Q_NUM };
+static const char *query_names[Q_NUM] = { "TargetCountry", "Language", "Genre", "ProviderName", "Delivery" };
+#define MAX_QUERY_VALUES      16
+#define MAX_QUERY_VALUE       256
+
+typedef struct
+{
+   char values[Q_NUM][MAX_QUERY_VALUES][MAX_QUERY_VALUE];
+   int counts[Q_NUM];
+   BOOLEAN regulator;            /* regulatorListFlag=true */
+   BOOLEAN any;                  /* a parameter that filters was given */
+} S_QUERY;
+
+/* %XX and '+' decoded, into a buffer of MAX_QUERY_VALUE */
+static void DecodeQueryValue(const char *from, size_t len, char *to)
+{
+   size_t n = 0;
+   unsigned hex;
+
+   while ((len > 0) && (n + 1 < MAX_QUERY_VALUE))
+   {
+      if ((*from == '%') && (len >= 3) && (sscanf(from + 1, "%2x", &hex) == 1))
+      {
+         to[n++] = (char)hex;
+         from += 3;
+         len -= 3;
+      }
+      else
+      {
+         to[n++] = (*from == '+') ? ' ' : *from;
+         from++;
+         len--;
+      }
+   }
+   to[n] = '\0';
+}
+
+static void ParseQuery(const char *query, S_QUERY *q)
+{
+   const char *p, *eq, *end;
+   char name[64];
+   size_t name_len;
+   int i;
+
+   memset(q, 0, sizeof(*q));
+   for (p = query; (p != NULL) && (*p != '\0'); p = (*end == '&') ? end + 1 : end)
+   {
+      end = p + strcspn(p, "&");
+      eq = memchr(p, '=', (size_t)(end - p));
+      if (eq == NULL)
+      {
+         continue;
+      }
+      DecodeQueryValue(p, (size_t)(eq - p), name);
+      name_len = strlen(name);
+      if ((name_len > 2) && (strcmp(name + name_len - 2, "[]") == 0))
+      {
+         name[name_len - 2] = '\0';
+      }
+      if (strcasecmp(name, "regulatorListFlag") == 0)
+      {
+         DecodeQueryValue(eq + 1, (size_t)(end - eq - 1), name);
+         if (strcasecmp(name, "true") == 0)
+         {
+            q->regulator = TRUE;
+            q->any = TRUE;
+         }
+         continue;
+      }
+      for (i = 0; i < Q_NUM; i++)
+      {
+         if ((strcasecmp(name, query_names[i]) == 0) && (q->counts[i] < MAX_QUERY_VALUES))
+         {
+            DecodeQueryValue(eq + 1, (size_t)(end - eq - 1), q->values[i][q->counts[i]]);
+            if (q->values[i][q->counts[i]][0] != '\0')
+            {
+               q->counts[i]++;
+               q->any = TRUE;
+            }
+         }
+      }
+   }
+}
+
+/* Text without the white space around it (Eutelsat lays its names out over several lines) */
+static void TrimmedText(xmlNodePtr node, char *text, size_t size)
+{
+   xmlChar *content = xmlNodeGetContent(node);
+   const char *start = (const char *)content;
+   size_t len;
+
+   text[0] = '\0';
+   if (content == NULL)
+   {
+      return;
+   }
+   while (isspace((unsigned char)*start))
+   {
+      start++;
+   }
+   len = strlen(start);
+   while ((len > 0) && isspace((unsigned char)start[len - 1]))
+   {
+      len--;
+   }
+   if (len >= size)
+   {
+      len = size - 1;
+   }
+   memcpy(text, start, len);
+   text[len] = '\0';
+   xmlFree(content);
+}
+
+static BOOLEAN IsElement(xmlNodePtr node, const char *name)
+{
+   return (node->type == XML_ELEMENT_NODE) && (xmlStrcmp(node->name, BAD_CAST name) == 0);
+}
+
+/* The delivery type a Delivery child names, as dvbi-client-js and DVB-I queries name them */
+static const char* DeliveryName(const xmlChar *element, char *buf, size_t size)
+{
+   size_t len;
+
+   if (xmlStrcmp(element, BAD_CAST "DASHDelivery") == 0) return "dvb-dash";
+   if (xmlStrcmp(element, BAD_CAST "DVBTDelivery") == 0) return "dvb-t";
+   if (xmlStrcmp(element, BAD_CAST "DVBSDelivery") == 0) return "dvb-s";
+   if (xmlStrcmp(element, BAD_CAST "DVBCDelivery") == 0) return "dvb-c";
+   len = strlen((const char *)element);
+   if ((len > 8) && (strcmp((const char *)element + len - 8, "Delivery") == 0))
+   {
+      len -= 8;
+   }
+   if (len >= size)
+   {
+      len = size - 1;
+   }
+   memcpy(buf, element, len);
+   buf[len] = '\0';
+   for (char *c = buf; *c != '\0'; c++)
+   {
+      *c = (char)tolower((unsigned char)*c);
+   }
+   return buf;
+}
+
+static BOOLEAN DeliveryMatches(const char *have, const char *want)
+{
+   /* the client's short names too */
+   if (strcasecmp(want, "dash") == 0) want = "dvb-dash";
+   else if (strcasecmp(want, "dvbt") == 0) want = "dvb-t";
+   else if (strcasecmp(want, "dvbs") == 0) want = "dvb-s";
+   else if (strcasecmp(want, "dvbc") == 0) want = "dvb-c";
+   return strcasecmp(have, want) == 0;
+}
+
+/* One language tag is the other or a more specific form of it: en matches en-GB, and en-GB en */
+static BOOLEAN LanguageMatches(const char *have, const char *want)
+{
+   size_t have_len = strlen(have);
+   size_t want_len = strlen(want);
+   size_t len = (have_len < want_len) ? have_len : want_len;
+
+   return (strncasecmp(have, want, len) == 0) &&
+          ((have[len] == '\0') || (have[len] == '-')) && ((want[len] == '\0') || (want[len] == '-'));
+}
+
+static BOOLEAN AnyValue(const S_QUERY *q, int param, const char *have)
+{
+   int i;
+
+   for (i = 0; i < q->counts[param]; i++)
+   {
+      if (((param == Q_LANGUAGE) && LanguageMatches(have, q->values[param][i])) ||
+          ((param == Q_DELIVERY) && DeliveryMatches(have, q->values[param][i])) ||
+          ((param != Q_LANGUAGE) && (param != Q_DELIVERY) && (strcasecmp(have, q->values[param][i]) == 0)))
+      {
+         return TRUE;
+      }
+   }
+   return FALSE;
+}
+
+/* Whether a ServiceListOffering matches every parameter given; one that doesn't declare a property
+ * that is asked for doesn't match */
+static BOOLEAN OfferingMatches(xmlNodePtr offering, const S_QUERY *q)
+{
+   xmlNodePtr node, child;
+   xmlChar *attr;
+   char text[MAX_QUERY_VALUE];
+   char buf[64];
+   char *token, *save;
+   BOOLEAN found[Q_NUM] = { FALSE, FALSE, FALSE, FALSE, FALSE };
+
+   if (q->regulator)
+   {
+      attr = xmlGetProp(offering, BAD_CAST "regulatorListFlag");
+      found[0] = (attr != NULL) && (xmlStrcmp(attr, BAD_CAST "true") == 0);
+      xmlFree(attr);
+      if (!found[0])
+      {
+         return FALSE;
+      }
+      found[0] = FALSE;
+   }
+   for (node = offering->children; node != NULL; node = node->next)
+   {
+      if (IsElement(node, "TargetCountry") && (q->counts[Q_COUNTRY] > 0))
+      {
+         TrimmedText(node, text, sizeof(text));
+         for (token = strtok_r(text, ", \t\n", &save); token != NULL; token = strtok_r(NULL, ", \t\n", &save))
+         {
+            found[Q_COUNTRY] |= AnyValue(q, Q_COUNTRY, token);
+         }
+      }
+      else if (IsElement(node, "Language") && (q->counts[Q_LANGUAGE] > 0))
+      {
+         TrimmedText(node, text, sizeof(text));
+         found[Q_LANGUAGE] |= AnyValue(q, Q_LANGUAGE, text);
+      }
+      else if (IsElement(node, "Genre") && (q->counts[Q_GENRE] > 0))
+      {
+         attr = xmlGetProp(node, BAD_CAST "href");
+         if (attr != NULL)
+         {
+            found[Q_GENRE] |= AnyValue(q, Q_GENRE, (const char *)attr);
+            xmlFree(attr);
+         }
+      }
+      else if (IsElement(node, "Delivery") && (q->counts[Q_DELIVERY] > 0))
+      {
+         for (child = node->children; child != NULL; child = child->next)
+         {
+            if (child->type == XML_ELEMENT_NODE)
+            {
+               found[Q_DELIVERY] |= AnyValue(q, Q_DELIVERY, DeliveryName(child->name, buf, sizeof(buf)));
+            }
+         }
+      }
+   }
+   return ((q->counts[Q_COUNTRY] == 0) || found[Q_COUNTRY]) &&
+          ((q->counts[Q_LANGUAGE] == 0) || found[Q_LANGUAGE]) &&
+          ((q->counts[Q_GENRE] == 0) || found[Q_GENRE]) &&
+          ((q->counts[Q_DELIVERY] == 0) || found[Q_DELIVERY]);
+}
+
+/* Whether a ProviderOffering's provider is one asked for */
+static BOOLEAN ProviderMatches(xmlNodePtr provider_offering, const S_QUERY *q)
+{
+   xmlNodePtr node, child;
+   char text[MAX_QUERY_VALUE];
+
+   if (q->counts[Q_PROVIDER] == 0)
+   {
+      return TRUE;
+   }
+   for (node = provider_offering->children; node != NULL; node = node->next)
+   {
+      if (IsElement(node, "Provider"))
+      {
+         for (child = node->children; child != NULL; child = child->next)
+         {
+            if (IsElement(child, "Name"))
+            {
+               TrimmedText(child, text, sizeof(text));
+               if (AnyValue(q, Q_PROVIDER, text))
+               {
+                  return TRUE;
+               }
+            }
+         }
+      }
+   }
+   return FALSE;
+}
+
+BOOLEAN REG_FilterEntryPoints(const U8BIT *data, U32BIT len, const char *query, U8BIT **filtered,
+   U32BIT *filtered_len)
+{
+   S_QUERY *q;
+   xmlDocPtr doc;
+   xmlNodePtr root, po, next_po, slo, next_slo;
+   xmlChar *out;
+   int out_len;
+   BOOLEAN keep;
+
+   *filtered = NULL;
+   *filtered_len = 0;
+   q = (S_QUERY *)malloc(sizeof(S_QUERY));
+   if (q == NULL)
+   {
+      return FALSE;
+   }
+   ParseQuery(query, q);
+   if (!q->any)
+   {
+      free(q);
+      return FALSE;
+   }
+   doc = xmlReadMemory((const char *)data, (int)len, NULL, NULL, XML_PARSE_NONET | XML_PARSE_NOWARNING | XML_PARSE_NOERROR);
+   root = (doc == NULL) ? NULL : xmlDocGetRootElement(doc);
+   if (root == NULL)
+   {
+      xmlFreeDoc(doc);
+      free(q);
+      return FALSE;
+   }
+
+   for (po = root->children; po != NULL; po = next_po)
+   {
+      next_po = po->next;
+      if (!IsElement(po, "ProviderOffering"))
+      {
+         continue;
+      }
+      keep = FALSE;
+      if (ProviderMatches(po, q))
+      {
+         for (slo = po->children; slo != NULL; slo = next_slo)
+         {
+            next_slo = slo->next;
+            if (IsElement(slo, "ServiceListOffering"))
+            {
+               if (OfferingMatches(slo, q))
+               {
+                  keep = TRUE;
+               }
+               else
+               {
+                  xmlUnlinkNode(slo);
+                  xmlFreeNode(slo);
+               }
+            }
+         }
+      }
+      if (!keep)
+      {
+         xmlUnlinkNode(po);
+         xmlFreeNode(po);
+      }
+   }
+   free(q);
+
+   out = NULL;
+   xmlDocDumpMemoryEnc(doc, &out, &out_len, "UTF-8");
+   xmlFreeDoc(doc);
+   if (out == NULL)
+   {
+      return FALSE;
+   }
+   *filtered = (U8BIT *)malloc(out_len + 1);
+   if (*filtered != NULL)
+   {
+      memcpy(*filtered, out, out_len);
+      (*filtered)[out_len] = '\0';
+      *filtered_len = (U32BIT)out_len;
+   }
+   xmlFree(out);
+   return *filtered != NULL;
+}
+
 void REG_ListNetworks(void *user_data, void (*callback)(void *user_data, const char *name))
 {
    DIR *dir;

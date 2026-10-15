@@ -149,6 +149,10 @@ scenario_networks()
    check "SES gets 503 with both tuners in use ($code)" "[ $code = 503 ]"
    code=$(status "/dvb-hb/318_601_17702.mpd/?src=DVB-HB&pos=13&freq=11317")
    check "DVB-HB request gets 501 ($code)" "[ $code = 501 ]"
+   check "entry points filtered by provider (ProviderName[]=SES)" \
+      "[ \$(curl -s -m 10 '$base/dvbi/slep.xml?ProviderName%5B%5D=SES' | grep -o '<ProviderOffering' | wc -l) -eq 1 ]"
+   check "entry points filtered by country (TargetCountry=GBR: none)" \
+      "! curl -s -m 10 '$base/dvbi/slep.xml?TargetCountry=GBR' | grep -q '<ProviderOffering'"
    check "/api/status is JSON with three sources" \
       "curl -s -m 10 '$base/api/status' | python3 -I -c 'import json,sys; sys.exit(len(json.load(sys.stdin)[\"sources\"]) != 3)'"
    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -X POST "$base/api/scan")
@@ -237,6 +241,14 @@ scenario_carousels()
       "fetch /ses.com/dvbi/cg/tva_schedule_20250210230000_P28DT20M_CoreSet.xml 90 '$work/schedule.xml'"
    size=$(stat -c %s "$work/schedule.xml" 2>/dev/null || echo 0)
    check "the schedule is served decoded ($size bytes)" "[ $size -gt 900000 ] && head -c 40 '$work/schedule.xml' | grep -q '<?xml'"
+
+   # the content guide endpoint (Annex D.6.2), at the manifest's URL
+   local cg="/ses.com/dvbi/cg/manifest.xml?sid=tag:ses.com,2024:B1.1"
+   check "guide: now and next for B1 (two events)" \
+      "fetch '$cg&now_next=true' 90 '$work/nownext.xml' && [ \$(grep -o '<ScheduleEvent' '$work/nownext.xml' | wc -l) -eq 2 ]"
+   check "guide: B1 on 11 February 2025, 18:00-24:00 (seven events)" \
+      "fetch '$cg&start=1739296800&end=1739318400' 30 '$work/window.xml' && [ \$(grep -o '<ScheduleEvent' '$work/window.xml' | wc -l) -eq 7 ]"
+   check "guide: a query without an end is refused (400)" "[ \$(status '$cg&start=1739296800') = 400 ]"
    stop "$log"
 }
 

@@ -242,6 +242,10 @@ scenario_carousels()
    size=$(stat -c %s "$work/schedule.xml" 2>/dev/null || echo 0)
    check "the schedule is served decoded ($size bytes)" "[ $size -gt 900000 ] && head -c 40 '$work/schedule.xml' | grep -q '<?xml'"
 
+   # a carousel's file that hasn't come round (this one is only partly in the capture): try again
+   check "a carousel file still on its way is 503 with Retry-After (brayden-prato.jpg)" \
+      "curl -s -D - -o /dev/null -m 20 '$base/ses.com/private/pictures/brayden-prato.jpg' | grep -q '^Retry-After'"
+
    # the content guide endpoint (Annex D.6.2), at the manifest's URL
    local cg="/ses.com/dvbi/cg/manifest.xml?sid=tag:ses.com,2024:B1.1"
    check "guide: now and next for B1 (two events)" \

@@ -284,8 +284,8 @@ async function openFile(service, instance) {
       return;
     }
     const retry = parseInt(response.headers.get('Retry-After'), 10) || FILE_RETRY_S;
-    log(response.status === 503 ? 'No tuner is free; trying again in ' + retry + ' s'
-                                : 'Waiting for the broadcast carousel; trying again in ' + retry + ' s', 'warn');
+    const reason = response.status === 503 ? (await response.text()).trim() : '';
+    log('Gateway: ' + (reason || 'waiting for the broadcast carousel') + '; trying again in ' + retry + ' s', 'warn');
     await new Promise((resolve) => setTimeout(resolve, retry * 1000));
     if (token !== playToken) return;
   }
@@ -343,7 +343,8 @@ async function play(service, instance) {
     /* 503: every tuner is in use; the gateway frees one when the services using it stop */
     while (response.status === 503) {
       const retry = parseInt(response.headers.get('Retry-After'), 10) || 10;
-      log('No tuner is free for this service; trying again in ' + retry + ' s', 'err');
+      const reason = (await response.text()).trim() || 'the service is not available yet';
+      log('Gateway: ' + reason + '; trying again in ' + retry + ' s', 'warn');
       await new Promise((resolve) => setTimeout(resolve, retry * 1000));
       if (token !== playToken) return;
       response = await fetch(url, { cache: 'no-store' });

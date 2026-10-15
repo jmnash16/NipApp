@@ -487,9 +487,9 @@ Still to do:
   transports to the database, so nothing is lost when it is replaced.
 - Large carousel files (SES's videos and PDFs): keep them on disk rather than
   in memory, answer byte range requests, and test with a capture that holds
-  them complete. Optionally answer 503 with `Retry-After` (from the
-  carousel's `targetAcquisitionLatency`) for a carousel file still on its
-  way, rather than 404 after 8 s.
+  them complete. (A carousel file still on its way is now answered 503 with
+  `Retry-After: 10`; a later refinement could take the delay from the
+  carousel's `targetAcquisitionLatency`.)
 - VandVD1 (DVB-HB) and OTT instances can't be played through the gateway.
 - The move to civetweb.
 
@@ -714,6 +714,16 @@ Assumed, to check against TS 103 770: the window rule above, and answering an
 unknown `sid` with an empty schedule (200). `tools/asan-check.sh carousels`
 checks now and next, a window and a bad query.
 
+A carousel's file that hasn't come round within the 8 s wait is answered 503
+with `Retry-After: 10` and the body "waiting for the broadcast carousel",
+rather than 404, so a client asks again (`DVBNIP_IsCarouselPath`). Every 503
+now says why in its body ("no tuner free", "receiving the content guide"),
+and the player shows that reason as it retries. Tested: `brayden-prato.jpg`,
+only partly in the SES capture, is 503 each time; `anna-kasin.jpg` arrived
+on the 6th request, after 50 s. Of SES's twelve pictures, four are known to
+be complete in the capture (anna-kasin, fabrice-villard, marek-piwnicki and
+vadym-chuma); haberdoedas wasn't identified in that check.
+
 ## Resume here (state at 2026-10-15)
 
 Committed: milestones 1-4, milestone 5 and the admin API (NippApp f48cdf2,
@@ -721,11 +731,12 @@ DVBCore 7f62ab0).
 
 Not committed yet:
 
-- Phase B so far, entry point query filtering and the content guide
-  endpoint: in DVBCore `dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`
-  (`DVBNIP_ListCarouselResources`); in NippApp `Makefile`, `inc/nippapp.h`,
+- Phase B so far, entry point query filtering, the content guide endpoint
+  and 503 for carousel files: in DVBCore `dvbnip/inc/nip_mgr.h`,
+  `dvbnip/src/nip_mgr.c` (`DVBNIP_ListCarouselResources`,
+  `DVBNIP_IsCarouselPath`); in NippApp `Makefile`, `inc/nippapp.h`,
   `src/guide.c` (new), `src/httpd.c`, `src/registry.c`,
-  `tools/asan-check.sh` and this file. `tools/asan-check.sh`: 57 of 57.
+  `player/player.html`, `tools/asan-check.sh` and this file. `tools/asan-check.sh`: 57 of 57.
 - dvbi-client-js (`~/dvbi-client-js`, remote `DTVKit/dvbi-client-js`):
   `src/service-list.js`, `test/parsers.test.js` (file deliveries, which the
   player needs for SES's offline content).

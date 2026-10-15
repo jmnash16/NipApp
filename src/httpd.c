@@ -75,6 +75,8 @@
 /* Retry-After when no tuner is free: a tuner is freed for a new request as soon as the services
  * using it have stopped, 20-30 s after their last request */
 #define NO_TUNER_RETRY_S      10
+/* Retry-After for a carousel's file that hasn't come round yet */
+#define CAROUSEL_RETRY_S      10
 
 /* The broadcast gives the DVB-I service list entry points a URN, not a URL (clause 8.2.5.1), so
  * the gateway chooses where to serve them (clause 8.1.7.3) */
@@ -202,16 +204,22 @@ static void SendNotFound(struct mg_connection *conn)
    SendResponse(conn, 404, "Not Found", "text/plain", "Cache-Control: no-store\r\n", NULL, 0);
 }
 
-/* No tuner is free for the carrier (8.5.3): try again once an idle one may have been released */
-static void SendNoTuner(struct mg_connection *conn)
+/* 503: try again after retry_s seconds; the body says why, for a client to show */
+static void SendUnavailable(struct mg_connection *conn, int retry_s, const char *reason)
 {
    char headers[128];
 
    /* exposed, as a client served from elsewhere can't read it otherwise */
    snprintf(headers, sizeof(headers),
       "Cache-Control: no-store\r\nRetry-After: %d\r\nAccess-Control-Expose-Headers: Retry-After\r\n",
-      NO_TUNER_RETRY_S);
-   SendResponse(conn, 503, "Service Unavailable", "text/plain", headers, NULL, 0);
+      retry_s);
+   SendResponse(conn, 503, "Service Unavailable", "text/plain", headers, reason, strlen(reason));
+}
+
+/* No tuner is free for the carrier (8.5.3): try again once an idle one may have been released */
+static void SendNoTuner(struct mg_connection *conn)
+{
+   SendUnavailable(conn, NO_TUNER_RETRY_S, "no tuner free\n");
 }
 
 static void GetHost(struct mg_connection *conn, char *host)
@@ -694,10 +702,23 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
          break;
       }
       /* whatever a SIF lists, or a directory it lists, may be on its way (a segment, a carousel's
-       * picture); anything else is answered 404 at once (8.5.3) */
-      if ((waited >= HOLD_MS) || !DVBNIP_IsPathSignalled((const U8BIT *)path))
+       * picture); anything else is answered 404 at once (8.5.3). An object carousel can take a
+       * minute or more to come round, so a file of one that hasn't come yet is 503, to try again. */
+      if (!DVBNIP_IsPathSignalled((const U8BIT *)path))
       {
          SendNotFound(conn);
+         return;
+      }
+      if (waited >= HOLD_MS)
+      {
+         if (DVBNIP_IsCarouselPath((const U8BIT *)path))
+         {
+            SendUnavailable(conn, CAROUSEL_RETRY_S, "waiting for the broadcast carousel\n");
+         }
+         else
+         {
+            SendNotFound(conn);
+         }
          return;
       }
       if (DVBNIP_IsTunerUnavailable((const U8BIT *)path))
@@ -989,7 +1010,6 @@ static void SendAdmin(struct mg_connection *conn, const struct mg_request_info *
 static BOOLEAN SendGuide(struct mg_connection *conn, const char *path, const char *query)
 {
    char *body, *rewritten;
-   char headers[128];
    U32BIT len;
    int status;
 
@@ -1020,10 +1040,7 @@ static BOOLEAN SendGuide(struct mg_connection *conn, const char *path, const cha
          SendResponse(conn, 400, "Bad Request", "text/plain", "Cache-Control: no-store\r\n", NULL, 0);
          break;
       case 503:
-         snprintf(headers, sizeof(headers),
-            "Cache-Control: no-store\r\nRetry-After: %d\r\nAccess-Control-Expose-Headers: Retry-After\r\n",
-            GUIDE_RetryAfter());
-         SendResponse(conn, 503, "Service Unavailable", "text/plain", headers, NULL, 0);
+         SendUnavailable(conn, GUIDE_RetryAfter(), "receiving the content guide\n");
          break;
       case 404:
          SendNotFound(conn);

@@ -691,6 +691,7 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
    char encoding_header[64];
    BOOLEAN from_registry;
    BOOLEAN data_malloced;
+   int filter;
 
    /* The NIP library's copy is the latest. Without one, a DVB-I document is served from the
     * registry; anything else under a service's directory starts the service, so it may arrive
@@ -768,10 +769,21 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
    }
    else if (REG_IsDvbiType((const char *)filetype))
    {
-      /* entry points asked for with query parameters are filtered (8.1.7.4) */
+      /* entry points asked for with query parameters are filtered (8.1.7.4); a query the DVB-I
+       * registry interface doesn't define is refused (TS 103 770 clause 5.1.3.2) */
+      filter = REG_NOT_FILTERED;
       if ((query != NULL) && (query[0] != '\0') &&
-          (strncasecmp((const char *)filetype, "application/xml+dvb-i-slep", 26) == 0) &&
-          REG_FilterEntryPoints(data, len, query, &decoded, &decoded_len))
+          (strncasecmp((const char *)filetype, "application/xml+dvb-i-slep", 26) == 0))
+      {
+         filter = REG_FilterEntryPoints(data, len, query, &decoded, &decoded_len);
+      }
+      if (filter == REG_BAD_QUERY)
+      {
+         SendResponse(conn, 400, "Bad Request", "text/plain", "Cache-Control: no-store\r\n",
+            "query parameter not defined, or value not valid\n", 48);
+         body = NULL;
+      }
+      else if (filter == REG_FILTERED)
       {
          if (data_malloced)
          {
@@ -785,11 +797,14 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
          len = decoded_len;
          data_malloced = TRUE;
       }
-      body = RewriteDvbGw(conn, (const char *)data, &len);
-      if (body != NULL)
+      if (filter != REG_BAD_QUERY)
       {
-         SendResponse(conn, 200, "OK", (const char *)filetype, "Cache-Control: no-store\r\n", body, len);
-         free(body);
+         body = RewriteDvbGw(conn, (const char *)data, &len);
+         if (body != NULL)
+         {
+            SendResponse(conn, 200, "OK", (const char *)filetype, "Cache-Control: no-store\r\n", body, len);
+            free(body);
+         }
       }
    }
    else

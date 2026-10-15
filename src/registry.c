@@ -271,51 +271,110 @@ static void DecodeQueryValue(const char *from, size_t len, char *to)
    to[n] = '\0';
 }
 
-static void ParseQuery(const char *query, S_QUERY *q)
+/* The delivery values a query may give (TS 103 770 table 12b) */
+static const char *delivery_values[] = { "dvb-dash", "dvb-t", "dvb-c", "dvb-s", "dvb-iptv", "application", NULL };
+
+static BOOLEAN IsBoolean(const char *value)
+{
+   return (strcmp(value, "true") == 0) || (strcmp(value, "false") == 0);
+}
+
+/* An ISO 3166 alpha-3 country code */
+static BOOLEAN IsCountry(const char *value)
+{
+   return (strlen(value) == 3) && isalpha((unsigned char)value[0]) && isalpha((unsigned char)value[1]) &&
+          isalpha((unsigned char)value[2]);
+}
+
+/* Reads the query (TS 103 770 clause 5.1.3.2): FALSE for a parameter it doesn't define or a value
+ * that isn't valid, which is answered 400 */
+static BOOLEAN ParseQuery(const char *query, S_QUERY *q)
 {
    const char *p, *eq, *end;
    char name[64];
+   char value[MAX_QUERY_VALUE];
    size_t name_len;
    int i;
+   const char **d;
 
    memset(q, 0, sizeof(*q));
    for (p = query; (p != NULL) && (*p != '\0'); p = (*end == '&') ? end + 1 : end)
    {
       end = p + strcspn(p, "&");
-      eq = memchr(p, '=', (size_t)(end - p));
-      if (eq == NULL)
+      if (end == p)
       {
          continue;
       }
+      eq = memchr(p, '=', (size_t)(end - p));
+      if (eq == NULL)
+      {
+         return FALSE;
+      }
       DecodeQueryValue(p, (size_t)(eq - p), name);
+      DecodeQueryValue(eq + 1, (size_t)(end - eq - 1), value);
       name_len = strlen(name);
       if ((name_len > 2) && (strcmp(name + name_len - 2, "[]") == 0))
       {
          name[name_len - 2] = '\0';
       }
-      if (strcasecmp(name, "regulatorListFlag") == 0)
+      if (value[0] == '\0')
       {
-         DecodeQueryValue(eq + 1, (size_t)(end - eq - 1), name);
-         if (strcasecmp(name, "true") == 0)
+         return FALSE;
+      }
+
+      if (strcmp(name, "regulatorListFlag") == 0)
+      {
+         if (!IsBoolean(value))
+         {
+            return FALSE;
+         }
+         /* true asks for the regulator lists; false for no such filtering */
+         if (strcmp(value, "true") == 0)
          {
             q->regulator = TRUE;
             q->any = TRUE;
          }
          continue;
       }
-      for (i = 0; i < Q_NUM; i++)
+      if (strcmp(name, "inlineImages") == 0)
       {
-         if ((strcasecmp(name, query_names[i]) == 0) && (q->counts[i] < MAX_QUERY_VALUES))
+         /* images are always given as URLs: the gateway serves them from the broadcast */
+         if (!IsBoolean(value))
          {
-            DecodeQueryValue(eq + 1, (size_t)(end - eq - 1), q->values[i][q->counts[i]]);
-            if (q->values[i][q->counts[i]][0] != '\0')
-            {
-               q->counts[i]++;
-               q->any = TRUE;
-            }
+            return FALSE;
+         }
+         continue;
+      }
+
+      for (i = 0; (i < Q_NUM) && (strcmp(name, query_names[i]) != 0); i++)
+      {
+      }
+      if (i == Q_NUM)
+      {
+         return FALSE;
+      }
+      if ((i == Q_COUNTRY) && !IsCountry(value))
+      {
+         return FALSE;
+      }
+      if (i == Q_DELIVERY)
+      {
+         for (d = delivery_values; (*d != NULL) && (strcmp(*d, value) != 0); d++)
+         {
+         }
+         if (*d == NULL)
+         {
+            return FALSE;
          }
       }
+      if (q->counts[i] < MAX_QUERY_VALUES)
+      {
+         strcpy(q->values[i][q->counts[i]], value);
+         q->counts[i]++;
+         q->any = TRUE;
+      }
    }
+   return TRUE;
 }
 
 /* Text without the white space around it (Eutelsat lays its names out over several lines) */
@@ -353,41 +412,17 @@ static BOOLEAN IsElement(xmlNodePtr node, const char *name)
    return (node->type == XML_ELEMENT_NODE) && (xmlStrcmp(node->name, BAD_CAST name) == 0);
 }
 
-/* The delivery type a Delivery child names, as dvbi-client-js and DVB-I queries name them */
-static const char* DeliveryName(const xmlChar *element, char *buf, size_t size)
+/* The query value a Delivery child answers to (TS 103 770 table 12b), or NULL */
+static const char* DeliveryName(const xmlChar *element)
 {
-   size_t len;
-
    if (xmlStrcmp(element, BAD_CAST "DASHDelivery") == 0) return "dvb-dash";
    if (xmlStrcmp(element, BAD_CAST "DVBTDelivery") == 0) return "dvb-t";
-   if (xmlStrcmp(element, BAD_CAST "DVBSDelivery") == 0) return "dvb-s";
    if (xmlStrcmp(element, BAD_CAST "DVBCDelivery") == 0) return "dvb-c";
-   len = strlen((const char *)element);
-   if ((len > 8) && (strcmp((const char *)element + len - 8, "Delivery") == 0))
-   {
-      len -= 8;
-   }
-   if (len >= size)
-   {
-      len = size - 1;
-   }
-   memcpy(buf, element, len);
-   buf[len] = '\0';
-   for (char *c = buf; *c != '\0'; c++)
-   {
-      *c = (char)tolower((unsigned char)*c);
-   }
-   return buf;
-}
-
-static BOOLEAN DeliveryMatches(const char *have, const char *want)
-{
-   /* the client's short names too */
-   if (strcasecmp(want, "dash") == 0) want = "dvb-dash";
-   else if (strcasecmp(want, "dvbt") == 0) want = "dvb-t";
-   else if (strcasecmp(want, "dvbs") == 0) want = "dvb-s";
-   else if (strcasecmp(want, "dvbc") == 0) want = "dvb-c";
-   return strcasecmp(have, want) == 0;
+   if (xmlStrcmp(element, BAD_CAST "DVBSDelivery") == 0) return "dvb-s";
+   if ((xmlStrcmp(element, BAD_CAST "MulticastTSDelivery") == 0) ||
+       (xmlStrcmp(element, BAD_CAST "RTSPDelivery") == 0)) return "dvb-iptv";
+   if (xmlStrcmp(element, BAD_CAST "ApplicationDelivery") == 0) return "application";
+   return NULL;
 }
 
 /* One language tag is the other or a more specific form of it: en matches en-GB, and en-GB en */
@@ -408,7 +443,7 @@ static BOOLEAN AnyValue(const S_QUERY *q, int param, const char *have)
    for (i = 0; i < q->counts[param]; i++)
    {
       if (((param == Q_LANGUAGE) && LanguageMatches(have, q->values[param][i])) ||
-          ((param == Q_DELIVERY) && DeliveryMatches(have, q->values[param][i])) ||
+          ((param == Q_DELIVERY) && (strcmp(have, q->values[param][i]) == 0)) ||
           ((param != Q_LANGUAGE) && (param != Q_DELIVERY) && (strcasecmp(have, q->values[param][i]) == 0)))
       {
          return TRUE;
@@ -417,45 +452,50 @@ static BOOLEAN AnyValue(const S_QUERY *q, int param, const char *have)
    return FALSE;
 }
 
-/* Whether a ServiceListOffering matches every parameter given; one that doesn't declare a property
- * that is asked for doesn't match */
+/* Whether a ServiceListOffering matches every parameter given (TS 103 770 clause 5.1.3.2): any of a
+ * parameter's values; an offering that doesn't declare a property matches whatever is asked for it */
 static BOOLEAN OfferingMatches(xmlNodePtr offering, const S_QUERY *q)
 {
    xmlNodePtr node, child;
    xmlChar *attr;
    char text[MAX_QUERY_VALUE];
-   char buf[64];
+   const char *delivery;
    char *token, *save;
    BOOLEAN found[Q_NUM] = { FALSE, FALSE, FALSE, FALSE, FALSE };
+   BOOLEAN declared[Q_NUM] = { FALSE, FALSE, FALSE, FALSE, FALSE };
+   BOOLEAN regulator;
+   int i;
 
    if (q->regulator)
    {
       attr = xmlGetProp(offering, BAD_CAST "regulatorListFlag");
-      found[0] = (attr != NULL) && (xmlStrcmp(attr, BAD_CAST "true") == 0);
+      regulator = (attr != NULL) && (xmlStrcmp(attr, BAD_CAST "true") == 0);
       xmlFree(attr);
-      if (!found[0])
+      if (!regulator)
       {
          return FALSE;
       }
-      found[0] = FALSE;
    }
    for (node = offering->children; node != NULL; node = node->next)
    {
-      if (IsElement(node, "TargetCountry") && (q->counts[Q_COUNTRY] > 0))
+      if (IsElement(node, "TargetCountry"))
       {
+         declared[Q_COUNTRY] = TRUE;
          TrimmedText(node, text, sizeof(text));
          for (token = strtok_r(text, ", \t\n", &save); token != NULL; token = strtok_r(NULL, ", \t\n", &save))
          {
             found[Q_COUNTRY] |= AnyValue(q, Q_COUNTRY, token);
          }
       }
-      else if (IsElement(node, "Language") && (q->counts[Q_LANGUAGE] > 0))
+      else if (IsElement(node, "Language"))
       {
+         declared[Q_LANGUAGE] = TRUE;
          TrimmedText(node, text, sizeof(text));
          found[Q_LANGUAGE] |= AnyValue(q, Q_LANGUAGE, text);
       }
-      else if (IsElement(node, "Genre") && (q->counts[Q_GENRE] > 0))
+      else if (IsElement(node, "Genre"))
       {
+         declared[Q_GENRE] = TRUE;
          attr = xmlGetProp(node, BAD_CAST "href");
          if (attr != NULL)
          {
@@ -463,21 +503,26 @@ static BOOLEAN OfferingMatches(xmlNodePtr offering, const S_QUERY *q)
             xmlFree(attr);
          }
       }
-      else if (IsElement(node, "Delivery") && (q->counts[Q_DELIVERY] > 0))
+      else if (IsElement(node, "Delivery"))
       {
          for (child = node->children; child != NULL; child = child->next)
          {
-            if (child->type == XML_ELEMENT_NODE)
+            if ((child->type == XML_ELEMENT_NODE) && ((delivery = DeliveryName(child->name)) != NULL))
             {
-               found[Q_DELIVERY] |= AnyValue(q, Q_DELIVERY, DeliveryName(child->name, buf, sizeof(buf)));
+               declared[Q_DELIVERY] = TRUE;
+               found[Q_DELIVERY] |= AnyValue(q, Q_DELIVERY, delivery);
             }
          }
       }
    }
-   return ((q->counts[Q_COUNTRY] == 0) || found[Q_COUNTRY]) &&
-          ((q->counts[Q_LANGUAGE] == 0) || found[Q_LANGUAGE]) &&
-          ((q->counts[Q_GENRE] == 0) || found[Q_GENRE]) &&
-          ((q->counts[Q_DELIVERY] == 0) || found[Q_DELIVERY]);
+   for (i = 0; i < Q_NUM; i++)
+   {
+      if ((i != Q_PROVIDER) && (q->counts[i] > 0) && declared[i] && !found[i])
+      {
+         return FALSE;
+      }
+   }
+   return TRUE;
 }
 
 /* Whether a ProviderOffering's provider is one asked for */
@@ -510,7 +555,7 @@ static BOOLEAN ProviderMatches(xmlNodePtr provider_offering, const S_QUERY *q)
    return FALSE;
 }
 
-BOOLEAN REG_FilterEntryPoints(const U8BIT *data, U32BIT len, const char *query, U8BIT **filtered,
+int REG_FilterEntryPoints(const U8BIT *data, U32BIT len, const char *query, U8BIT **filtered,
    U32BIT *filtered_len)
 {
    S_QUERY *q;
@@ -525,13 +570,17 @@ BOOLEAN REG_FilterEntryPoints(const U8BIT *data, U32BIT len, const char *query, 
    q = (S_QUERY *)malloc(sizeof(S_QUERY));
    if (q == NULL)
    {
-      return FALSE;
+      return REG_NOT_FILTERED;
    }
-   ParseQuery(query, q);
+   if (!ParseQuery(query, q))
+   {
+      free(q);
+      return REG_BAD_QUERY;
+   }
    if (!q->any)
    {
       free(q);
-      return FALSE;
+      return REG_NOT_FILTERED;
    }
    doc = xmlReadMemory((const char *)data, (int)len, NULL, NULL, XML_PARSE_NONET | XML_PARSE_NOWARNING | XML_PARSE_NOERROR);
    root = (doc == NULL) ? NULL : xmlDocGetRootElement(doc);
@@ -539,7 +588,7 @@ BOOLEAN REG_FilterEntryPoints(const U8BIT *data, U32BIT len, const char *query, 
    {
       xmlFreeDoc(doc);
       free(q);
-      return FALSE;
+      return REG_NOT_FILTERED;
    }
 
    for (po = root->children; po != NULL; po = next_po)
@@ -582,7 +631,7 @@ BOOLEAN REG_FilterEntryPoints(const U8BIT *data, U32BIT len, const char *query, 
    xmlFreeDoc(doc);
    if (out == NULL)
    {
-      return FALSE;
+      return REG_NOT_FILTERED;
    }
    *filtered = (U8BIT *)malloc(out_len + 1);
    if (*filtered != NULL)
@@ -592,7 +641,7 @@ BOOLEAN REG_FilterEntryPoints(const U8BIT *data, U32BIT len, const char *query, 
       *filtered_len = (U32BIT)out_len;
    }
    xmlFree(out);
-   return *filtered != NULL;
+   return (*filtered != NULL) ? REG_FILTERED : REG_NOT_FILTERED;
 }
 
 void REG_ListNetworks(void *user_data, void (*callback)(void *user_data, const char *name))

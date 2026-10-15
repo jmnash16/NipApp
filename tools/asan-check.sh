@@ -58,7 +58,7 @@ start()
    ./build/nippapp -d "$dir" -s "$sources" -p "$port" "$@" > "$log" 2>&1 &
    pid=$!
    for _ in $(seq 1 400); do
-      grep -q "HTTP server" "$log" && return 0
+      grep -q "HTTP server" "$log" 2>/dev/null && return 0
       kill -0 "$pid" 2>/dev/null || break
       sleep 1
    done
@@ -151,8 +151,11 @@ scenario_networks()
    check "DVB-HB request gets 501 ($code)" "[ $code = 501 ]"
    check "entry points filtered by provider (ProviderName[]=SES)" \
       "[ \$(curl -s -m 10 '$base/dvbi/slep.xml?ProviderName%5B%5D=SES' | grep -o '<ProviderOffering' | wc -l) -eq 1 ]"
-   check "entry points filtered by country (TargetCountry=GBR: none)" \
-      "! curl -s -m 10 '$base/dvbi/slep.xml?TargetCountry=GBR' | grep -q '<ProviderOffering'"
+   check "entry points by country: only lists that declare none (TargetCountry=GBR: Inverto's)" \
+      "[ \$(curl -s -m 10 '$base/dvbi/slep.xml?TargetCountry=GBR' | grep -o '<ProviderOffering' | wc -l) -eq 1 ]"
+   check "entry points: an undefined parameter is refused (400)" "[ \$(status '/dvbi/slep.xml?Unknown=1') = 400 ]"
+   check "entry points: a Delivery value not in the table is refused (Delivery=dash: 400)" \
+      "[ \$(status '/dvbi/slep.xml?Delivery=dash') = 400 ]"
    if command -v avahi-browse > /dev/null && grep -q "mDNS: announced" "$log"; then
       check "announced with mDNS: _dvbservdsc._tcp with dvbi_sep on port $port" \
          "timeout 10 avahi-browse -rpt _dvbservdsc._tcp | grep -q 'dvbi_sep=http://[0-9.]*:$port/dvbi/slep.xml'"
@@ -257,6 +260,11 @@ scenario_carousels()
    check "guide: B1 on 11 February 2025, 18:00-24:00 (seven events)" \
       "fetch '$cg&start=1739296800&end=1739318400' 30 '$work/window.xml' && [ \$(grep -o '<ScheduleEvent' '$work/window.xml' | wc -l) -eq 7 ]"
    check "guide: a query without an end is refused (400)" "[ \$(status '$cg&start=1739296800') = 400 ]"
+   check "guide: a window not on whole 3 hours is refused (400)" "[ \$(status '$cg&start=1739296801&end=1739318401') = 400 ]"
+   check "guide: now_next=window gives more than now and next" \
+      "fetch '$cg&now_next=window' 30 '$work/window2.xml' && [ \$(grep -o '<ScheduleEvent' '$work/window2.xml' | wc -l) -gt 2 ]"
+   check "guide: an unknown service has empty tables" \
+      "fetch '/ses.com/dvbi/cg/manifest.xml?sid=unknown&now_next=true' 30 '$work/unknown.xml' && grep -q '<ProgramLocationTable/>' '$work/unknown.xml'"
    stop "$log"
 }
 

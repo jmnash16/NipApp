@@ -60,6 +60,12 @@
 #define MAX_SID_LEN           256
 #define MAX_EVENTS            4096
 #define GUIDE_RETRY_S         10
+#define SEGMENT_S             10800      /* schedule windows start and end on whole 3 hours */
+#define DAY_S                 86400
+#define WINDOW_EVENTS         10         /* now_next=window: up to this many events before and after */
+
+/* What is asked for */
+enum { ASK_SCHEDULE, ASK_NOW_NEXT, ASK_WINDOW };
 
 /*---local typedef structs for this file--------------------------------------*/
 
@@ -106,8 +112,10 @@ static void AddTagRefs(const char *manifest_path, S_SOURCES *sources);
 static void AddDocument(const char *path, S_SOURCES *sources);
 static void AddResource(void *user_data, const U8BIT *resource);
 static int CompareEvents(const void *a, const void *b);
-static char* BuildAnswer(S_SOURCES *sources, const char *sid, BOOLEAN now_next, time_t from, time_t to,
+static char* BuildAnswer(S_SOURCES *sources, const char *sid, int ask, time_t from, time_t to,
    BOOLEAN inclusive, U32BIT *len);
+static time_t BroadcastTime(void);
+static BOOLEAN ParseUnixTime(const char *text, time_t *t);
 
 /*---global function definitions---------------------------------------------*/
 
@@ -119,9 +127,9 @@ int GUIDE_Query(const char *path, const char *query, char **body, U32BIT *len)
    char *filetype;
    char sid[MAX_SID_LEN];
    char value[64];
-   BOOLEAN now_next, inclusive;
-   time_t from = 0, to = 0;
-   int i, status;
+   BOOLEAN inclusive;
+   time_t from = 0, to = 0, today;
+   int i, status, ask;
 
    *body = NULL;
    *len = 0;
@@ -144,12 +152,36 @@ int GUIDE_Query(const char *path, const char *query, char **body, U32BIT *len)
       return status;
    }
 
-   now_next = QueryValue(query, "now_next", value, sizeof(value)) && (strcasecmp(value, "true") == 0);
-   inclusive = QueryValue(query, "inclusive", value, sizeof(value)) && (strcasecmp(value, "true") == 0);
-   if (!now_next)
+   /* now_next=true or window (TS 103 770 clause 6.5.3); otherwise a window of the schedule, whose
+    * times are whole 3 hours, 6 or 12 hours apart, within 28 days of today (clause 6.5.2.1) */
+   ask = ASK_SCHEDULE;
+   if (QueryValue(query, "now_next", value, sizeof(value)))
    {
-      if (!QueryValue(query, "start", value, sizeof(value)) || ((from = (time_t)strtoll(value, NULL, 10)) <= 0) ||
-          !QueryValue(query, "end", value, sizeof(value)) || ((to = (time_t)strtoll(value, NULL, 10)) <= from))
+      if (strcmp(value, "true") == 0)
+      {
+         ask = ASK_NOW_NEXT;
+      }
+      else if (strcmp(value, "window") == 0)
+      {
+         ask = ASK_WINDOW;
+      }
+      else
+      {
+         return 400;
+      }
+   }
+   inclusive = QueryValue(query, "inclusive", value, sizeof(value)) && (strcmp(value, "true") == 0);
+   if (ask == ASK_SCHEDULE)
+   {
+      if (!QueryValue(query, "start", value, sizeof(value)) || !ParseUnixTime(value, &from) ||
+          !QueryValue(query, "end", value, sizeof(value)) || !ParseUnixTime(value, &to) ||
+          ((from % SEGMENT_S) != 0) || ((to % SEGMENT_S) != 0) ||
+          (((to - from) != 2 * SEGMENT_S) && ((to - from) != 4 * SEGMENT_S)))
+      {
+         return 400;
+      }
+      today = BroadcastTime() / DAY_S * DAY_S;
+      if ((from < today - 28 * DAY_S) || (to > today + DAY_S + 28 * DAY_S))
       {
          return 400;
       }
@@ -170,7 +202,7 @@ int GUIDE_Query(const char *path, const char *query, char **body, U32BIT *len)
    }
    else
    {
-      *body = BuildAnswer(&sources, sid, now_next, from, to, inclusive, len);
+      *body = BuildAnswer(&sources, sid, ask, from, to, inclusive, len);
       status = (*body != NULL) ? 200 : 500;
    }
    pthread_mutex_unlock(&guide_mutex);
@@ -183,6 +215,25 @@ int GUIDE_RetryAfter(void)
 }
 
 /*---local function definitions-----------------------------------------------*/
+
+/* A Unix time: digits only */
+static BOOLEAN ParseUnixTime(const char *text, time_t *t)
+{
+   char *end;
+   long long value;
+
+   if ((*text < '0') || (*text > '9'))
+   {
+      return FALSE;
+   }
+   value = strtoll(text, &end, 10);
+   if ((*end != '\0') || (value <= 0))
+   {
+      return FALSE;
+   }
+   *t = (time_t)value;
+   return TRUE;
+}
 
 /* A query parameter's value, %XX decoded; the first if it is given more than once */
 static BOOLEAN QueryValue(const char *query, const char *name, char *value, size_t size)
@@ -526,7 +577,7 @@ static int CompareEvents(const void *a, const void *b)
 }
 
 /* The ScheduleEvents of a service in a document, with their times */
-static int CollectEvents(S_GUIDE_DOC *doc, const char *sid, S_EVENT *events, int count)
+static int CollectEvents(S_GUIDE_DOC *doc, const char *sid, S_EVENT *events, int count, BOOLEAN *known)
 {
    xmlNodePtr root, pd, plt, schedule, event, child;
    xmlChar *ref, *text;
@@ -550,6 +601,7 @@ static int CollectEvents(S_GUIDE_DOC *doc, const char *sid, S_EVENT *events, int
                continue;
             }
             xmlFree(ref);
+            *known = TRUE;
             for (event = schedule->children; (event != NULL) && (count < MAX_EVENTS); event = event->next)
             {
                if (!IsElement(event, "ScheduleEvent")) continue;
@@ -646,12 +698,13 @@ static void FormatTime(time_t t, char *text, size_t size)
 }
 
 /* A TVAMain with the service's chosen events and their programmes */
-static char* BuildAnswer(S_SOURCES *sources, const char *sid, BOOLEAN now_next, time_t from, time_t to,
+static char* BuildAnswer(S_SOURCES *sources, const char *sid, int ask, time_t from, time_t to,
    BOOLEAN inclusive, U32BIT *len)
 {
    S_EVENT *events;
-   int count, kept, i, j, now_index;
+   int count, kept, i, j, first, last, current;
    time_t now;
+   BOOLEAN known = FALSE;
    xmlDocPtr out;
    xmlNodePtr root, pd, pit, plt, schedule, copy, program;
    xmlNsPtr ns;
@@ -669,7 +722,7 @@ static char* BuildAnswer(S_SOURCES *sources, const char *sid, BOOLEAN now_next, 
    count = 0;
    for (i = 0; i < sources->count; i++)
    {
-      count = CollectEvents(sources->docs[i], sid, events, count);
+      count = CollectEvents(sources->docs[i], sid, events, count, &known);
    }
    qsort(events, count, sizeof(S_EVENT), CompareEvents);
 
@@ -691,42 +744,35 @@ static char* BuildAnswer(S_SOURCES *sources, const char *sid, BOOLEAN now_next, 
    }
    count = kept;
 
-   /* choose: now and next, or the window */
-   if (now_next)
+   /* choose the events: now and next, now with up to ten before and after, or those in the window */
+   if (ask != ASK_SCHEDULE)
    {
       now = BroadcastTime();
-      now_index = -1;
-      for (i = 0; (i < count) && (now_index < 0); i++)
+      /* the event on now, else (nothing on) the next one */
+      for (current = 0; (current < count) && (events[current].end <= now); current++)
       {
-         if ((events[i].start <= now) && (now < events[i].end))
-         {
-            now_index = i;
-         }
       }
-      if (now_index < 0)
+      first = (ask == ASK_WINDOW) ? current - WINDOW_EVENTS : current;
+      if (first < 0)
       {
-         /* nothing on: the next one only */
-         for (i = 0; (i < count) && (events[i].start <= now); i++)
-         {
-         }
-         now_index = i;
-         j = (now_index < count) ? 1 : 0;
+         first = 0;
       }
-      else
+      last = current + ((ask == ASK_WINDOW) ? WINDOW_EVENTS : ((current < count) && (events[current].start <= now) ? 1 : 0));
+      if (last >= count)
       {
-         j = (now_index + 1 < count) ? 2 : 1;
+         last = count - 1;
       }
       for (i = 0; i < count; i++)
       {
-         if ((i < now_index) || (i >= now_index + j))
+         if ((i < first) || (i > last))
          {
             xmlFree(events[i].crid);
             events[i].crid = NULL;
             events[i].event = NULL;
          }
       }
-      from = (j > 0) ? events[now_index].start : now;
-      to = (j > 0) ? events[now_index + j - 1].end : now;
+      from = (first <= last) ? events[first].start : now;
+      to = (first <= last) ? events[last].end : now;
    }
    else
    {
@@ -752,12 +798,18 @@ static char* BuildAnswer(S_SOURCES *sources, const char *sid, BOOLEAN now_next, 
    pd = xmlNewChild(root, ns, BAD_CAST "ProgramDescription", NULL);
    pit = xmlNewChild(pd, ns, BAD_CAST "ProgramInformationTable", NULL);
    plt = xmlNewChild(pd, ns, BAD_CAST "ProgramLocationTable", NULL);
-   schedule = xmlNewChild(plt, ns, BAD_CAST "Schedule", NULL);
-   xmlNewProp(schedule, BAD_CAST "serviceIDRef", BAD_CAST sid);
-   FormatTime(from, text, sizeof(text));
-   xmlNewProp(schedule, BAD_CAST "start", BAD_CAST text);
-   FormatTime(to, text, sizeof(text));
-   xmlNewProp(schedule, BAD_CAST "end", BAD_CAST text);
+   /* a service the guide doesn't know has empty tables (TS 103 770 clause 6.5.2.2); one it knows,
+    * a Schedule even if it has no events then (clause 6.5.4.1) */
+   schedule = NULL;
+   if (known)
+   {
+      schedule = xmlNewChild(plt, ns, BAD_CAST "Schedule", NULL);
+      xmlNewProp(schedule, BAD_CAST "serviceIDRef", BAD_CAST sid);
+      FormatTime(from, text, sizeof(text));
+      xmlNewProp(schedule, BAD_CAST "start", BAD_CAST text);
+      FormatTime(to, text, sizeof(text));
+      xmlNewProp(schedule, BAD_CAST "end", BAD_CAST text);
+   }
 
    for (i = 0; i < count; i++)
    {

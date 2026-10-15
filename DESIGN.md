@@ -692,19 +692,28 @@ match, any of its values; providers are matched by `Provider/Name`, ignoring
 case and surrounding white space; the rest by each `ServiceListOffering`'s
 `TargetCountry` codes, `Language` (a tag matches a more or less specific form
 of itself, `en` with `en-GB`), `Genre` hrefs, `Delivery` children
-(`DASHDelivery` is `dvb-dash` or `dash`, ...) and `regulatorListFlag`; a
-provider left with no offering is removed; unknown parameters are ignored.
-Assumed, to check against TS 103 770: an offering that doesn't declare a
-property that is asked for doesn't match (e.g. Inverto's list, which has no
-TargetCountry, isn't returned for `TargetCountry=...`). Tested by hand and
-with dvbi-client-js's discovery parameters; `tools/asan-check.sh networks`
-checks a provider and a country query.
+and `regulatorListFlag`; a provider left with no offering is removed.
+
+Checked against TS 103 770 clause 5.1.3.2 (2026-10-15) and corrected: an
+offering that doesn't declare a property matches whatever is asked for it
+(Inverto's list, which declares no country, delivery or language, is
+returned for `TargetCountry=LUX` or `GBR`); a parameter the registry
+interface doesn't define, or a value that isn't valid, is answered 400
+(`REG_BAD_QUERY`); `Delivery` values are those of table 12b (`dvb-dash`,
+`dvb-t`, `dvb-c`, `dvb-s`, `dvb-iptv` for `MulticastTSDelivery` or
+`RTSPDelivery`, `application`); `TargetCountry` must be a three-letter code;
+`regulatorListFlag` and `inlineImages` must be `true` or `false`.
+`regulatorListFlag=false` applies no filter. `inlineImages=true` is
+accepted, but images are still given as URLs, which the gateway serves from
+the broadcast. Tested by hand and with dvbi-client-js's discovery parameters;
+`tools/asan-check.sh networks` checks a provider and a country query, an
+undefined parameter and a Delivery value outside the table.
 
 Content guide endpoint (Annex D, 2026-10-15): a DVB-I client asks the
 service list's `ScheduleInfoEndpoint`, which for a broadcast list is the NIP
 Content Guide Manifest (`http://dvb.gw/ses.com/dvbi/cg/manifest.xml`), with
-`?sid=<ServiceIDRef>&start=<s>&end=<s>` or `?sid=...&now_next=true`
-(`src/guide.c`). The manifest's `GuideSession` `TagRef`s are the tags of the
+`?sid=<ServiceIDRef>&start=<s>&end=<s>`, `?sid=...&now_next=true` or
+`?sid=...&now_next=window` (`src/guide.c`). The manifest's `GuideSession` `TagRef`s are the tags of the
 object carousels carrying the guide (SES: `/ses.com/dvbi/cg/CoreSet`, a gzip
 TV-Anytime schedule of 534 programmes over four weeks, and its images); the
 stream's NIP Service Guide Manifest (`urn:dvb:metadata:nativeip:ServiceGuide`)
@@ -723,9 +732,16 @@ Jenseits", then "Leben mit Vulkanen"; seven programmes 18:00-24:00) and with
 dvbi-client-js's `epg.getEvents`. dvbi-client-js chooses now and next by its
 own clock, so with these 2025 recordings its `getNowNext` finds nothing
 current, though the gateway answers; live reception has no such gap.
-Assumed, to check against TS 103 770: the window rule above, and answering an
-unknown `sid` with an empty schedule (200). `tools/asan-check.sh carousels`
-checks now and next, a window and a bad query.
+Checked against TS 103 770 clauses 6.5.2-6.5.4 (2026-10-15): the window rule
+is as specified. Corrected: `start` and `end` must be whole 3 hours, 6 or 12
+hours apart, within 28 days of today by the broadcast clock, or the answer
+is 400; `now_next=window` gives the current event with up to ten before and
+after (the 16 SES has for B1 at 14:21), any other `now_next` value 400; a
+service no guide document has a Schedule for gets empty tables, one that has
+a Schedule but no events in the window an empty Schedule. Other parameters
+(`image_variant`, `regionID[]`) are ignored, which the clause allows.
+`tools/asan-check.sh carousels` checks now and next, a window, a window
+query, a bad query, a misaligned window and an unknown service.
 
 A carousel's file that hasn't come round within the 8 s wait is answered 503
 with `Retry-After: 10` and the body "waiting for the broadcast carousel",
@@ -756,27 +772,23 @@ NippApp's own handler.
 
 ## Resume here (state at 2026-10-15)
 
-Committed: milestones 1-4, milestone 5 and the admin API (NippApp f48cdf2,
-DVBCore 7f62ab0).
+Committed: milestones 1-5 (but the same-clock test) and Phase B so far: query
+filtering, the content guide endpoint, 503 for carousel files, the mDNS
+announcement and civetweb (NippApp af047fd, DVBCore 94c2412).
 
 Not committed yet:
 
-- Phase B so far, entry point query filtering, the content guide endpoint,
-  503 for carousel files and the mDNS announcement: in DVBCore `dvbnip/inc/nip_mgr.h`,
-  `dvbnip/src/nip_mgr.c` (`DVBNIP_ListCarouselResources`,
-  `DVBNIP_IsCarouselPath`); in NippApp `Makefile`, `inc/nippapp.h`,
-  `src/guide.c` (new), `src/mdns.c` (new), `src/httpd.c`, `src/main.c`,
-  `third_party/civetweb/` (new; `third_party/mongoose/` removed),
-  `platform/COPIED.md`,
-  `src/registry.c`, `player/player.html`, `tools/asan-check.sh` and this
-  file. Building with the mDNS announcement needs `libavahi-client-dev`, and
-  running it `avahi-daemon`. `tools/asan-check.sh`: 57 of 57.
+- The corrections from checking TS 103 770 (entry point filtering, the
+  content guide's windows, now_next=window, unknown services): in NippApp
+  `inc/nippapp.h`, `src/guide.c`, `src/httpd.c`, `src/registry.c`,
+  `tools/asan-check.sh` (64 of 64) and this file.
 - dvbi-client-js (`~/dvbi-client-js`, remote `DTVKit/dvbi-client-js`):
   `src/service-list.js`, `test/parsers.test.js` (file deliveries, which the
   player needs for SES's offline content).
 
-`dvbnip/test/DVB-NIP-DVB-Iplan.md` and `dvbnip/test/DTVkit.code-workspace`
-in DVBCore are local files, not to be committed.
+The DVB-I specification is in `DVBCore/documents/ts_103770v010201p.pdf`;
+`DVBCore/documents/` and DVBCore's `dvbnip/test/DVB-NIP-DVB-Iplan.md` and
+`dvbnip/test/DTVkit.code-workspace` are local files, not to be committed.
 
 To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:
 
@@ -795,6 +807,7 @@ changes.
 
 Milestone 5 still needs captures of two carriers with the same clock.
 
-Next: the rest of Phase B: an independent DVB-I client; later, large
+Next: the rest of Phase B: an independent DVB-I client (the mDNS TXT format is
+still to confirm); later, large
 carousel files (on disk, byte ranges; after civetweb, and needs a capture
 that holds them complete). Optional later: DVB-HB support (VandVD1).

@@ -153,6 +153,10 @@ scenario_networks()
       "[ \$(curl -s -m 10 '$base/dvbi/slep.xml?ProviderName%5B%5D=SES' | grep -o '<ProviderOffering' | wc -l) -eq 1 ]"
    check "entry points filtered by country (TargetCountry=GBR: none)" \
       "! curl -s -m 10 '$base/dvbi/slep.xml?TargetCountry=GBR' | grep -q '<ProviderOffering'"
+   if command -v avahi-browse > /dev/null && grep -q "mDNS: announced" "$log"; then
+      check "announced with mDNS: _dvbservdsc._tcp with dvbi_sep on port $port" \
+         "timeout 10 avahi-browse -rpt _dvbservdsc._tcp | grep -q 'dvbi_sep=http://[0-9.]*:$port/dvbi/slep.xml'"
+   fi
    check "/api/status is JSON with three sources" \
       "curl -s -m 10 '$base/api/status' | python3 -I -c 'import json,sys; sys.exit(len(json.load(sys.stdin)[\"sources\"]) != 3)'"
    code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' -X POST "$base/api/scan")

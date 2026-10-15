@@ -92,6 +92,21 @@ void HTTPD_Stop(void);
 void HTTPD_AllowAdminFromAny(BOOLEAN any);
 
 /**
+ * @brief   Starts announcing the gateway with DNS-SD/mDNS (clause 11.1), through avahi-daemon: a
+ *          _dvbservdsc._tcp and an _http._tcp service on each IPv4 interface, with dvbi_sep giving
+ *          the entry points URL. Waits for avahi-daemon if it isn't running.
+ * @param   name instance name, or NULL for "NippApp on <hostname>"
+ * @param   port the HTTP port
+ * @return  FALSE if the announcement can't be started
+ */
+BOOLEAN MDNS_Start(const char *name, int port);
+
+/**
+ * @brief   Withdraws the announcement
+ */
+void MDNS_Stop(void);
+
+/**
  * @brief   The gateway's state as JSON, for /api/status: version, uptime, scan, sources, tuners,
  *          NIP streams and the services being received, file store, wall clock, networks
  * @return  the JSON, to be freed with free(), or NULL

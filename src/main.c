@@ -148,6 +148,8 @@ int main(int argc, char *argv[])
       {"port", required_argument, NULL, 'p'},
       {"player-dir", required_argument, NULL, 'P'},
       {"admin-from-any", no_argument, NULL, 'A'},
+      {"name", required_argument, NULL, 'n'},
+      {"no-mdns", no_argument, NULL, 'M'},
       {"help", no_argument, NULL, 'h'},
       {"version", no_argument, NULL, 'V'},
       {NULL, 0, NULL, 0}
@@ -161,12 +163,14 @@ int main(int argc, char *argv[])
    char player_dir[PATH_MAX];
    BOOLEAN force_scan = FALSE;
    BOOLEAN admin_from_any = FALSE;
+   BOOLEAN mdns = TRUE;
+   const char *name = NULL;
    int opt;
 
    /* Line-buffered output, so that progress shows when the output goes to a file */
    setvbuf(stdout, NULL, _IOLBF, 0);
 
-   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:P:AhV", long_opts, NULL)) != -1)
+   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:P:An:MhV", long_opts, NULL)) != -1)
    {
       switch (opt)
       {
@@ -190,6 +194,12 @@ int main(int argc, char *argv[])
             break;
          case 'A':
             admin_from_any = TRUE;
+            break;
+         case 'n':
+            name = optarg;
+            break;
+         case 'M':
+            mdns = FALSE;
             break;
          case 'V':
             printf("NippApp %s\n", NIPPAPP_VERSION);
@@ -272,6 +282,17 @@ int main(int argc, char *argv[])
       return 1;
    }
 
+   /* Announced on the LAN (clause 11.1), so DVB-I clients can find the gateway */
+   if (mdns)
+   {
+#ifdef NIPPAPP_MDNS
+      MDNS_Start(name, atoi(port));
+#else
+      (void)name;
+      printf("NippApp: built without Avahi (libavahi-client-dev): no mDNS announcement\n");
+#endif
+   }
+
    /* Everything else runs on DVBCore's tasks; the main thread runs scans asked for through the
     * admin API, and waits for a stop request */
    while (!NIPPAPP_StopRequested(1000))
@@ -289,6 +310,12 @@ int main(int argc, char *argv[])
       }
    }
 
+#ifdef NIPPAPP_MDNS
+   if (mdns)
+   {
+      MDNS_Stop();
+   }
+#endif
    HTTPD_Stop();
    REG_Stop();
 
@@ -314,6 +341,8 @@ static void Usage(const char *name)
       "  -P, --player-dir <dir> web player files (default: player/ next to build/)\n"
       "  -A, --admin-from-any   answer /api/status and /api/scan from any address, not only\n"
       "                         this machine\n"
+      "  -n, --name <name>      name announced with mDNS (default: NippApp on <hostname>)\n"
+      "  -M, --no-mdns          don't announce the gateway with mDNS\n"
       "  -h, --help             show this help\n"
       "  -V, --version          show the version\n", name, DEFAULT_SOURCES, DEFAULT_COUNTRY, DEFAULT_PORT);
 }

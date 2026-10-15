@@ -6,6 +6,7 @@
 #   make                 build build/nippapp
 #   make DEBUG=0         optimised build
 #   make ASAN=1          build with AddressSanitizer
+#   make MDNS=0          build without the mDNS announcement (Avahi)
 #   make clean
 
 DVBCORE_ROOT ?= $(abspath ../DVBCore)
@@ -71,6 +72,16 @@ LDFLAGS += -fsanitize=address
 endif
 
 LIBS = -L$(DVBCORE_LIB) -ldvbcore -lsqlite3 -lxml2 -ljpeg -lpng -lz -lpthread -lm -ldl
+
+# The mDNS announcement uses avahi-daemon through libavahi-client (libavahi-client-dev); without
+# it NippApp is built without the announcement. MDNS=0 leaves it out anyway.
+ifneq ($(MDNS),0)
+ifeq ($(shell pkg-config --exists avahi-client && echo yes),yes)
+SRCS += src/mdns.c
+DEFINES += NIPPAPP_MDNS
+LIBS += $(shell pkg-config --libs avahi-client)
+endif
+endif
 
 OBJS = $(SRCS:%.c=$(BUILD_DIR)/obj/%.o)
 

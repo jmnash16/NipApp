@@ -97,7 +97,7 @@ NippApp/
     registry.c           keeps every DVB-I document received on disk (query filtering: Phase B)
     guide.c              content guide endpoint (Annex D.6.2)
     httpd.c              HTTP server: broadcast files, DVB-I rewriting, /time, /dvbi/slep.xml (milestone 4)
-    mdns.c               DNS-SD/mDNS announcement (Phase B)
+    mdns.c               DNS-SD/mDNS announcement through avahi-daemon
   platform/
     COPIED.md            files copied from App, with their source and changes
     os/                  copy of App/platform/os/linux (tasks, mutexes, queues, clock)
@@ -140,7 +140,9 @@ network need real code; the rest are stubs, added as the linker asks for them.
    links with `libdvbcore.a`, `sqlite3`, `xml2`, `jpeg`, `png`, `z` and
    `pthread` (DVBCore's image decoding needs jpeg and png). No SDL, ffmpeg,
    Lua or Qt. `make ASAN=1` builds with AddressSanitizer; run `make clean`
-   when switching between the two.
+   when switching between the two. With `libavahi-client-dev` installed it
+   also links libavahi-client for the mDNS announcement (`make MDNS=0` to
+   leave it out); without it NippApp builds without the announcement.
 3. The build defines `DVBNIP_BUILD`, the same as DVBCore.
 
 ## Startup and scanning
@@ -336,13 +338,25 @@ button "DVB-HB" rather than DASH, and still plays it as DASH. NippApp has no
 DVB-HB function, so it answers any request with `src=DVB-HB` in its query at
 once with 501 Not Implemented, and the player says why.
 
-## Discovery (Phase B)
+## Discovery
 
-DNS-SD/mDNS is mandatory for a DM3 gateway (11.1): service type
-`_dvbservdsc._tcp` (and `_http._tcp`), a TXT record with
-`dvbi_sep=<entry points URL on the gateway's IP>`, optionally `manuf`,
-`model`, `tuners` and `orb_pos_A`. Avahi on Linux. Browser clients cannot use
-mDNS; they load the player from the gateway.
+DNS-SD/mDNS is mandatory for a DM3 gateway (11.1). NippApp registers through
+avahi-daemon (`src/mdns.c`, libavahi-client) a `_dvbservdsc._tcp` and an
+`_http._tcp` service on each IPv4 interface of the LAN, named "NippApp on
+<hostname>" (`--name` to choose; Avahi picks "... #2" on a clash), on the HTTP
+port. The `_dvbservdsc._tcp` TXT record has `txtvers=1`,
+`dvbi_sep=http://<that interface's address>:<port>/dvbi/slep.xml` (a literal
+address, as dvbi-client-js allows plain HTTP only to private addresses),
+`manuf=DTVKit`, `model=NippApp` and `tuners=DVB-S2/<tuners>`; the
+`_http._tcp` one has `path=/`. The keys are separate TXT strings as in RFC
+6763, which the clause cites; its `"k1=v1;k2=v2"` example is taken as
+notation (to check). `orb_pos_A` isn't given, as the file tuner has no real
+orbital position. Without avahi-daemon NippApp says so and announces once it
+starts; `--no-mdns` (`-M`) leaves the announcement out, and a build without
+libavahi-client-dev (or `make MDNS=0`) has none. Browser clients cannot use
+mDNS; they load the player from the gateway. Under WSL with NAT networking
+the announcement stays inside the WSL VM (mirrored networking, or a native
+Linux host, reaches the LAN).
 
 ## Milestones
 
@@ -724,6 +738,13 @@ on the 6th request, after 50 s. Of SES's twelve pictures, four are known to
 be complete in the capture (anna-kasin, fabrice-villard, marek-piwnicki and
 vadym-chuma); haberdoedas wasn't identified in that check.
 
+mDNS announcement (11.1, 2026-10-15): see Discovery. Tested with
+avahi-browse: "NippApp on Zen" as `_dvbservdsc._tcp` and `_http._tcp` on
+eth0 with the TXT keys above, its `dvbi_sep` URL serving the entry points; a
+second gateway renamed "NippApp on Zen #2"; both withdrawn when stopped.
+`tools/asan-check.sh networks` checks the announcement when avahi-browse is
+installed.
+
 ## Resume here (state at 2026-10-15)
 
 Committed: milestones 1-4, milestone 5 and the admin API (NippApp f48cdf2,
@@ -731,12 +752,14 @@ DVBCore 7f62ab0).
 
 Not committed yet:
 
-- Phase B so far, entry point query filtering, the content guide endpoint
-  and 503 for carousel files: in DVBCore `dvbnip/inc/nip_mgr.h`,
+- Phase B so far, entry point query filtering, the content guide endpoint,
+  503 for carousel files and the mDNS announcement: in DVBCore `dvbnip/inc/nip_mgr.h`,
   `dvbnip/src/nip_mgr.c` (`DVBNIP_ListCarouselResources`,
   `DVBNIP_IsCarouselPath`); in NippApp `Makefile`, `inc/nippapp.h`,
-  `src/guide.c` (new), `src/httpd.c`, `src/registry.c`,
-  `player/player.html`, `tools/asan-check.sh` and this file. `tools/asan-check.sh`: 57 of 57.
+  `src/guide.c` (new), `src/mdns.c` (new), `src/httpd.c`, `src/main.c`,
+  `src/registry.c`, `player/player.html`, `tools/asan-check.sh` and this
+  file. Building with the mDNS announcement needs `libavahi-client-dev`, and
+  running it `avahi-daemon`. `tools/asan-check.sh`: 57 of 57.
 - dvbi-client-js (`~/dvbi-client-js`, remote `DTVKit/dvbi-client-js`):
   `src/service-list.js`, `test/parsers.test.js` (file deliveries, which the
   player needs for SES's offline content).
@@ -761,6 +784,6 @@ changes.
 
 Milestone 5 still needs captures of two carriers with the same clock.
 
-Next: the rest of Phase B: mDNS, civetweb, an independent DVB-I client; later, large
+Next: the rest of Phase B: civetweb, an independent DVB-I client; later, large
 carousel files (on disk, byte ranges; after civetweb, and needs a capture
 that holds them complete). Optional later: DVB-HB support (VandVD1).

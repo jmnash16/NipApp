@@ -7,12 +7,13 @@
 #   make DEBUG=0         optimised build
 #   make ASAN=1          build with AddressSanitizer
 #   make MDNS=0          build without the mDNS announcement (Avahi)
+#   tools/package.sh     build a tarball that runs on other Linux PCs (see DESIGN.md)
 #   make clean
 
 DVBCORE_ROOT ?= $(abspath ../DVBCore)
 DVBCORE_LIB  ?= $(DVBCORE_ROOT)/build/bin
 
-BUILD_DIR = build
+BUILD_DIR ?= build
 TARGET    = $(BUILD_DIR)/nippapp
 
 CC ?= cc
@@ -71,6 +72,11 @@ ifeq ($(ASAN),1)
 CFLAGS += -fsanitize=address -fno-omit-frame-pointer
 LDFLAGS += -fsanitize=address
 endif
+
+# Libraries are looked for in ../lib next to the executable first, as in the tarball from
+# tools/package.sh (bin/nippapp, lib/). An RPATH rather than a RUNPATH, so that the libraries'
+# own dependencies (libxml2's ICU) are found there too. A build has no ../lib, so it uses the system's.
+LDFLAGS += -Wl,-rpath,'$$ORIGIN/../lib' -Wl,--disable-new-dtags
 
 LIBS = -L$(DVBCORE_LIB) -ldvbcore -lsqlite3 -lxml2 -ljpeg -lpng -lz -lpthread -lm -ldl
 

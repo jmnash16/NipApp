@@ -145,6 +145,58 @@ network need real code; the rest are stubs, added as the linker asks for them.
    leave it out); without it NippApp builds without the announcement.
 3. The build defines `DVBNIP_BUILD`, the same as DVBCore.
 
+## Running on a separate Linux PC
+
+Under WSL2's default NAT networking the gateway can't be reached from the LAN
+(an STB, another PC) and its mDNS announcement stays inside the WSL VM. A
+64-bit Linux PC on the LAN avoids both. On Ubuntu or Debian:
+
+1. Install: `build-essential git libsqlite3-dev libxml2-dev libjpeg-dev
+   libpng-dev zlib1g-dev libfreetype-dev avahi-daemon avahi-utils
+   libavahi-client-dev`, then `sudo systemctl enable --now avahi-daemon`.
+2. Copy `DVBCore` and `NippApp` side by side (e.g. `~/DTVkit/`), most simply
+   `rsync -a --exclude build ~/DTVkit/DVBCore ~/DTVkit/NippApp user@pc:DTVkit/`,
+   which also brings `player/vendor/` (not in git; rebuilding it needs Node.js
+   and `~/dvbi-client-js` with the file delivery change). Or clone
+   `jmnash16/DVBCore-nip` (branch `dvbnip-gateway`) and `jmnash16/NipApp`.
+3. Copy the captures needed (not `1067000.ts` or `1077000.ts`) and write a
+   sources file with their absolute paths.
+4. Build: `source ./example_setenv.sh && make -j8` in DVBCore, then `make` in
+   NippApp.
+5. If `ufw` is on: `sudo ufw allow 8080/tcp` and `sudo ufw allow 5353/udp`.
+6. Run `./build/nippapp -d <dir> -s <sources> --scan`; the log gives the
+   `dvbi_sep` URL announced with mDNS.
+
+Without building there: `tools/package.sh` (here) writes
+`build/nippapp-<version>-linux-x86_64.tar.gz` with `bin/nippapp` (optimised,
+stripped), `lib/`, `player/` (with `vendor/`), `sources.conf` and
+`README.txt`. An executable from this machine fails on a newer Ubuntu
+because libxml2 2.14 changed its soname (`libxml2.so.2` to `.so.16`), and ICU
+changes its soname with every version. So `lib/` has this machine's libxml2,
+ICU, SQLite, libjpeg and libpng. NippApp is linked with an RPATH
+`$ORIGIN/../lib`; an RPATH, not a RUNPATH, so that libxml2's own ICU is found
+there too. glibc, Avahi with D-Bus and systemd, zlib, liblzma and libstdc++
+are taken from the target. Avahi has to match the target's avahi-daemon, and
+the others are on every system and backwards compatible. So the target needs
+the build machine's glibc or later: package on the oldest distribution to be
+supported (24.04 gives glibc 2.38). A server install also needs
+`libavahi-client3 avahi-daemon`, or a package built with
+`tools/package.sh MDNS=0`. On the target: unpack, put the captures' paths in
+`sources.conf` and run `bin/nippapp`, then do step 5. This was tested in a
+chroot that has only the system libraries.
+
+A DVB-I client configured by hand (e.g. an STB) is given the entry points,
+`http://<gateway address>:8080/dvbi/slep.xml`, or a single list (e.g.
+`/ses.com/dvbi/service_list_full.xml`, `/dvb_i_sl_physical.xml`,
+`/main_service_list.xml`, `/dvbi/nippapp_list.xml`), always by IP address:
+the gateway rewrites `dvb.gw` in what it serves to the address the client
+used. Under WSL, a Windows port forward (`netsh interface portproxy add
+v4tov4 listenport=8080 listenaddress=0.0.0.0 connectport=8080
+connectaddress=<WSL address>` and a firewall rule) or WSL's mirrored
+networking reaches the LAN too. With the recordings, a client that takes
+"now" from its own clock shows no current programmes (the guide is February
+2025), and only plain HTTP is served.
+
 ## Startup and scanning
 
 1. `APP_InitialiseDVB(EventHandler, DVB_INIT_NO_TELETEXT_OR_SUBTITLES)`.
@@ -772,16 +824,12 @@ NippApp's own handler.
 
 ## Resume here (state at 2026-10-15)
 
-Committed: milestones 1-5 (but the same-clock test) and Phase B so far: query
-filtering, the content guide endpoint, 503 for carousel files, the mDNS
-announcement and civetweb (NippApp af047fd, DVBCore 94c2412).
+Committed: milestones 1-5 (but the same-clock test) and Phase B, including
+civetweb and the corrections from checking TS 103 770.
 
 Not committed yet:
 
-- The corrections from checking TS 103 770 (entry point filtering, the
-  content guide's windows, now_next=window, unknown services): in NippApp
-  `inc/nippapp.h`, `src/guide.c`, `src/httpd.c`, `src/registry.c`,
-  `tools/asan-check.sh` (64 of 64) and this file.
+- This file's latest additions ("Running on a separate Linux PC").
 - dvbi-client-js (`~/dvbi-client-js`, remote `DTVKit/dvbi-client-js`):
   `src/service-list.js`, `test/parsers.test.js` (file deliveries, which the
   player needs for SES's offline content).
@@ -807,7 +855,9 @@ changes.
 
 Milestone 5 still needs captures of two carriers with the same clock.
 
-Next: the rest of Phase B: an independent DVB-I client (the mDNS TXT format is
-still to confirm); later, large
+Next: the rest of Phase B: an independent DVB-I client (Jason's STB, its
+service list endpoints set by hand; best with NippApp on a separate Linux PC,
+see "Running on a separate Linux PC"; the mDNS TXT format is still to
+confirm); later, large
 carousel files (on disk, byte ranges; after civetweb, and needs a capture
 that holds them complete). Optional later: DVB-HB support (VandVD1).

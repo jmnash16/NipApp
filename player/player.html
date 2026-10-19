@@ -10,6 +10,10 @@
   endpoints (the service list entry points at /dvbi/slep.xml and the service lists they name),
   using dvbi-client-js, and plays them with dash.js or hls.js. The files in vendor/ are made by
   tools/build-player.sh.
+
+  The address may name where to start, relative to the gateway or absolute:
+    player/?list=/ses.com/dvbi/service_list_full.xml    that service list only, without the entry points
+    player/?slep=/dvbi/slep.xml?regulatorListFlag=false entry points other than /dvbi/slep.xml
 -->
 <html lang="en">
 <head>
@@ -90,7 +94,9 @@ const LIVE_DELAY = 4;      // seconds behind the live edge: segments arrive once
 const JOIN_MARGIN = 1;     // extra seconds after joining, before the first segment is needed
 const FILE_WAIT_MS = 180000; // how long to wait for a carousel's file to come round
 const FILE_RETRY_S = 5;      // between requests for a carousel's file that hasn't arrived
-const ENTRY_POINTS = new URL('/dvbi/slep.xml', location.origin).href;
+const START = new URLSearchParams(location.search);
+const ENTRY_POINTS = new URL(START.get('slep') || '/dvbi/slep.xml', location.origin).href;
+const ONE_LIST = START.get('list') ? new URL(START.get('list'), location.origin).href : null;
 
 const $ = (id) => document.getElementById(id);
 const video = $('video');
@@ -160,14 +166,12 @@ async function start() {
   client.connect();
   await client.call('dvbi.manager.initialize');
 
-  log('Reading the service list entry points at ' + ENTRY_POINTS);
-  const discovered = await client.call('dvbi.services.discoverServiceLists', { registryUrl: ENTRY_POINTS });
   offerings = [];
-  for (const entry of discovered.providers || []) {
-    for (const offering of entry.offerings || []) {
-      const url = (offering.selectedServiceListUrls || offering.serviceListUrls || [])[0];
-      if (url) offerings.push({ name: textOf(offering.name) || url, provider: textOf(entry.provider.name), url });
-    }
+  if (ONE_LIST) {
+    offerings.push({ name: ONE_LIST, provider: '', url: ONE_LIST });
+  } else {
+    log('Reading the service list entry points at ' + ENTRY_POINTS);
+    await findOfferings();
   }
   if (!offerings.length) {
     log('The entry points list no service lists', 'err');
@@ -184,6 +188,17 @@ async function start() {
   });
   select.onchange = () => loadList(offerings[Number(select.value)]);
   await loadList(offerings[0]);
+}
+
+/* The service lists that the entry points name */
+async function findOfferings() {
+  const discovered = await client.call('dvbi.services.discoverServiceLists', { registryUrl: ENTRY_POINTS });
+  for (const entry of discovered.providers || []) {
+    for (const offering of entry.offerings || []) {
+      const url = (offering.selectedServiceListUrls || offering.serviceListUrls || [])[0];
+      if (url) offerings.push({ name: textOf(offering.name) || url, provider: textOf(entry.provider.name), url });
+    }
+  }
 }
 
 async function loadList(offering) {

@@ -116,7 +116,11 @@ char* ADMIN_StatusJson(void)
       }
    }
 
-   Append(&j, "],\"streams\":[");
+   /* maxPerCarrier is null for every channel on the carrier */
+   Append(&j, "],\"prebuffer\":{\"enabled\":%s,\"maxPerCarrier\":", (NIPPAPP_GetPrebuffer() != 0) ? "true" : "false");
+   Append(&j, (NIPPAPP_GetPrebuffer() == DVBNIP_PREBUFFER_ALL) ? "null}" : "%u}", (unsigned)NIPPAPP_GetPrebuffer());
+
+   Append(&j, ",\"streams\":[");
    j.first = TRUE;
    DVBNIP_ListStreams(&j, AddStream, AddPlaying);
    if (j.in_stream)
@@ -229,9 +233,9 @@ static void AddStream(void *user_data, const S_DVBNIP_STREAM *stream)
       Append(j, "]}");
    }
    Append(j, "%s{\"network\":%u,\"carrier\":%u,\"service\":%u,\"tuned\":%s,\"noTuner\":%s,"
-      "\"entries\":%u,\"receiving\":[", j->first ? "" : ",", (unsigned)stream->nid, (unsigned)stream->tid,
-      (unsigned)stream->svcid, stream->tuned ? "true" : "false", stream->no_tuner ? "true" : "false",
-      (unsigned)stream->services);
+      "\"entries\":%u,\"prebuffered\":%u,\"receiving\":[", j->first ? "" : ",", (unsigned)stream->nid,
+      (unsigned)stream->tid, (unsigned)stream->svcid, stream->tuned ? "true" : "false",
+      stream->no_tuner ? "true" : "false", (unsigned)stream->services, (unsigned)stream->prebuffered);
    j->first = FALSE;
    j->in_stream = TRUE;
 }
@@ -247,8 +251,9 @@ static void AddPlaying(void *user_data, const S_DVBNIP_PLAYING *service)
    }
    Append(j, "%s{\"path\":", (j->text[j->len - 1] == '[') ? "" : ",");
    AppendString(j, (const char *)service->path);
-   Append(j, ",\"clients\":%u,\"idleSeconds\":%lu,\"bytes\":%lu}", (unsigned)service->clients,
-      (unsigned long)service->idle_seconds, (unsigned long)service->memory_usage);
+   Append(j, ",\"clients\":%u,\"idleSeconds\":%lu,\"bytes\":%lu,\"prebuffered\":%s}",
+      (unsigned)service->clients, (unsigned long)service->idle_seconds, (unsigned long)service->memory_usage,
+      service->prebuffered ? "true" : "false");
 }
 
 static void AddNetwork(void *user_data, const char *name)

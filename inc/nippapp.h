@@ -67,6 +67,12 @@ BOOLEAN NIPPAPP_RequestScan(void);
 void NIPPAPP_GetScanState(BOOLEAN *running, BOOLEAN *completed, time_t *finished, time_t *since);
 
 /**
+ * @brief   The pre-buffering setting (--prebuffer), for status
+ * @return  the most channels pre-buffered on each carrier: 0 when off, DVBNIP_PREBUFFER_ALL for all
+ */
+U16BIT NIPPAPP_GetPrebuffer(void);
+
+/**
  * @brief   Prints the services in the database
  */
 void NIPPAPP_PrintServices(void);

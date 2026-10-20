@@ -35,6 +35,7 @@
 #include "app.h"
 #include "ap_dbacc.h"
 #include "nipphw.h"
+#include "nip_mgr.h"
 
 #include "nippapp.h"
 
@@ -60,6 +61,7 @@ static BOOLEAN scan_running = FALSE;
 static BOOLEAN scan_completed = FALSE;
 static time_t scan_finished = 0;
 static time_t started = 0;
+static U16BIT prebuffer = DVBNIP_PREBUFFER_ALL;
 
 /*---local function prototypes for this file----------------------------------*/
 static void Usage(const char *name);
@@ -68,6 +70,11 @@ static BOOLEAN InstallSignalHandlers(void);
 static BOOLEAN FindPlayerDir(const char *given, const char *argv0, char *dir, size_t size);
 
 /*---global function definitions---------------------------------------------*/
+
+U16BIT NIPPAPP_GetPrebuffer(void)
+{
+   return prebuffer;
+}
 
 BOOLEAN NIPPAPP_RequestScan(void)
 {
@@ -150,6 +157,7 @@ int main(int argc, char *argv[])
       {"admin-from-any", no_argument, NULL, 'A'},
       {"name", required_argument, NULL, 'n'},
       {"no-mdns", no_argument, NULL, 'M'},
+      {"prebuffer", required_argument, NULL, 'b'},
       {"help", no_argument, NULL, 'h'},
       {"version", no_argument, NULL, 'V'},
       {NULL, 0, NULL, 0}
@@ -165,12 +173,14 @@ int main(int argc, char *argv[])
    BOOLEAN admin_from_any = FALSE;
    BOOLEAN mdns = TRUE;
    const char *name = NULL;
+   char *end;
+   long max;
    int opt;
 
    /* Line-buffered output, so that progress shows when the output goes to a file */
    setvbuf(stdout, NULL, _IOLBF, 0);
 
-   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:P:An:MhV", long_opts, NULL)) != -1)
+   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:P:An:Mb:hV", long_opts, NULL)) != -1)
    {
       switch (opt)
       {
@@ -200,6 +210,26 @@ int main(int argc, char *argv[])
             break;
          case 'M':
             mdns = FALSE;
+            break;
+         case 'b':
+            if (strcmp(optarg, "all") == 0)
+            {
+               prebuffer = DVBNIP_PREBUFFER_ALL;
+            }
+            else if (strcmp(optarg, "off") == 0)
+            {
+               prebuffer = 0;
+            }
+            else
+            {
+               max = strtol(optarg, &end, 10);
+               if ((end == optarg) || (*end != '\0') || (max < 0) || (max >= DVBNIP_PREBUFFER_ALL))
+               {
+                  fprintf(stderr, "NippApp: --prebuffer takes all, off or a number of channels\n");
+                  return 1;
+               }
+               prebuffer = (U16BIT)max;
+            }
             break;
          case 'V':
             printf("NippApp %s\n", NIPPAPP_VERSION);
@@ -265,6 +295,18 @@ int main(int argc, char *argv[])
 
    printf("NippApp: DVBCore initialised, %u services in the database\n",
       (unsigned)ADB_GetNumServicesInList(ADB_SERVICE_LIST_ALL, FALSE));
+
+   /* While a client receives a channel, the others on its carrier are received too, so that a
+    * channel change finds their latest segments already here */
+   DVBNIP_SetPrebuffer(prebuffer);
+   if (prebuffer == DVBNIP_PREBUFFER_ALL)
+   {
+      printf("NippApp: pre-buffering every channel on the carrier being received\n");
+   }
+   else if (prebuffer != 0)
+   {
+      printf("NippApp: pre-buffering up to %u channels on the carrier being received\n", (unsigned)prebuffer);
+   }
 
    if (!NIPPAPP_SetupCountry(country) || !REG_Init())
    {
@@ -343,6 +385,9 @@ static void Usage(const char *name)
       "                         this machine\n"
       "  -n, --name <name>      name announced with mDNS (default: NippApp on <hostname>)\n"
       "  -M, --no-mdns          don't announce the gateway with mDNS\n"
+      "  -b, --prebuffer <n>    while a channel is received, also receive the other channels on\n"
+      "                         its carrier for a faster channel change: all (default), off, or\n"
+      "                         the most channels\n"
       "  -h, --help             show this help\n"
       "  -V, --version          show the version\n", name, DEFAULT_SOURCES, DEFAULT_COUNTRY, DEFAULT_PORT);
 }

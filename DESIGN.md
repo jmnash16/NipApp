@@ -305,6 +305,29 @@ matters with two carriers tuned: both send their SIFs on the same announcement
 session, in turn. A provider's SIF is never dropped, only replaced by a newer
 one from the same provider.
 
+Pre-buffering (2026-10-20): while a client receives a channel, the NIP
+library also receives the other channels on the same NIP stream (carrier),
+so a channel change finds their latest segments already in the file store.
+The carrier is tuned already, so this needs no other tuner, only CPU and
+memory. Each channel is pre-buffered once, in the format of the channel being
+watched where it has it (DASH B1 watched: DASH B2 and C1, not their HLS).
+A channel left for another stays running, pre-buffered. A pre-buffered
+service keeps only 12 s of files, not the usual 30 s. Pre-buffered services
+stop together with the last channel a client receives on the carrier, so
+the tuner is released as before. `DVBNIP_SetPrebuffer` (off by default in
+DVBCore) sets the most channels per stream. NippApp's `--prebuffer` takes
+`all` (the default), `off` or a number, in stream order. `/api/status` gives
+the setting (`prebuffer`), a count per stream, and `prebuffered` on each
+service received.
+
+Measured on SES with B1 watched, a change to B2: without pre-buffering, the
+manifest took 2 s and the segment 6 s behind live (where the player starts)
+was 404 after 8 s. It was broadcast before B2 was joined, so the player has
+to wait for new segments, the 6-7 s seen. With pre-buffering, the manifest
+and that segment came in under 0.01 s. Memory on SES: the pre-buffered B2
+held 10-23 MB, B1 (watched) up to 43 MB. `tools/asan-check.sh prebuffer`
+checks this, `--prebuffer 1` and the release.
+
 Served MPDs list only segments actually available (9.1.2):
 `minimumUpdatePeriod` 2 s, the first MPD held until the client's live point
 lies after the join, and the AAC config fix from the test tool.
@@ -822,14 +845,16 @@ IPv4-mapped addresses), and the library is started and stopped with
 `mg_init_library` and `mg_exit_library`. Every request is still answered by
 NippApp's own handler.
 
-## Resume here (state at 2026-10-15)
+## Resume here (state at 2026-10-20)
 
 Committed: milestones 1-5 (but the same-clock test) and Phase B, including
 civetweb and the corrections from checking TS 103 770.
 
 Not committed yet:
 
-- This file's latest additions ("Running on a separate Linux PC").
+- Pre-buffering: DVBCore `dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`;
+  NippApp `src/main.c`, `src/admin.c`, `inc/nippapp.h`,
+  `tools/asan-check.sh`, this file.
 - dvbi-client-js (`~/dvbi-client-js`, remote `DTVKit/dvbi-client-js`):
   `src/service-list.js`, `test/parsers.test.js` (file deliveries, which the
   player needs for SES's offline content).
@@ -855,9 +880,11 @@ changes.
 
 Milestone 5 still needs captures of two carriers with the same clock.
 
-Next: the rest of Phase B: an independent DVB-I client (Jason's STB, its
+Next: disk caching of large files (agreed design: carousel files over a size
+threshold received to a partial file on disk and served from it with byte
+ranges; live segments stay in RAM unless asked; `--store-dir`,
+`--disk-threshold`, `--disk-limit`; a FLUTE PCAP generator to test it, as no
+capture holds large files complete). Then the rest of Phase B: an independent DVB-I client (Jason's STB, its
 service list endpoints set by hand; best with NippApp on a separate Linux PC,
 see "Running on a separate Linux PC"; the mDNS TXT format is still to
-confirm); later, large
-carousel files (on disk, byte ranges; after civetweb, and needs a capture
-that holds them complete). Optional later: DVB-HB support (VandVD1).
+confirm). Optional later: DVB-HB support (VandVD1).

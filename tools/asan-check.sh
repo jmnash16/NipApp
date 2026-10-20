@@ -5,7 +5,8 @@
 # at the end.
 #
 #   tools/asan-check.sh            all scenarios
-#   tools/asan-check.sh scans      one scenario: scans, networks, change, carousels, nolist or retune
+#   tools/asan-check.sh scans      one scenario: scans, networks, change, carousels, nolist, retune
+#                                  or prebuffer
 #
 # CAPTURES (default ../Streams/DvbNIP next to the NippApp directory) is where the captures are, PORT
 # (default 18080) the HTTP port used, and KEEP=1 keeps the working directories and logs.
@@ -314,6 +315,71 @@ scenario_retune()
 }
 
 # ---------------------------------------------------------------------------------------------------
+# Pre-buffering (SES): while a client receives B1, the other channels on the carrier are received
+# in B1's format, so a change to B2 finds its latest segments at once; they stop with B1
+
+# the services being received, as "path:pre" or "path:client" lines
+receiving()
+{
+   curl -s -m 10 "$base/api/status" | python3 -c '
+import json, sys
+for s in json.load(sys.stdin)["streams"]:
+    for r in s["receiving"]:
+        print(r["path"] + (":pre" if r["prebuffered"] else ":client"))'
+}
+
+scenario_prebuffer()
+{
+   local dir="$work/prebuffer" conf="$work/prebuffer.conf" log="$work/prebuffer.log" b="/ses.com/livesim2"
+   local watcher now n took released stopped
+   echo "Pre-buffering (SES)"
+   source_line 11141 H 23500 pcap 2025-02-11_1min.pcap > "$conf"
+   check "--prebuffer refuses a value that isn't all, off or a number" \
+      "! ./build/nippapp -d '$dir' -s '$conf' --prebuffer some > /dev/null 2>&1"
+   start "$dir" "$conf" "$log" --scan || { stop "$log"; return; }
+
+   # a player on B1: the manifest every second
+   ( while true; do curl -s -o /dev/null -m 5 "$base$b/B1/Manifest.mpd"; sleep 1; done ) &
+   watcher=$!
+   sleep 15
+   receiving > "$work/prebuffer.receiving"
+   check "B1 is received for the client" "grep -qx '$b/B1/Manifest.mpd:client' '$work/prebuffer.receiving'"
+   check "B2 and C1 are pre-buffered, as DASH" \
+      "grep -qx '$b/B2/Manifest.mpd:pre' '$work/prebuffer.receiving' && grep -qx '$b/C1/Manifest.mpd:pre' '$work/prebuffer.receiving'"
+   check "no HLS service is pre-buffered" "! grep -q 'm3u8:pre' '$work/prebuffer.receiving'"
+   check "/api/status gives the setting" \
+      "curl -s -m 10 '$base/api/status' | grep -q '\"prebuffer\":{\"enabled\":true,\"maxPerCarrier\":null}'"
+
+   took=$(curl -s -o /dev/null -m 20 -w '%{http_code} %{time_total}' "$base$b/B2/Manifest.mpd")
+   check "a change to B2: its manifest at once ($took s)" "[ '${took% *}' = 200 ] && awk 'BEGIN { exit !(${took#* } < 0.5) }'"
+   now=$(date -u -d "$(curl -s -m 5 "$base/time")" +%s 2>/dev/null || echo 0)
+   n=$(( (now - 6) / 2 ))
+   took=$(curl -s -o /dev/null -m 20 -w '%{http_code} %{time_total}' "$base$b/B2/HD/$n.m4s")
+   check "a change to B2: the segment 6 s behind live at once ($took s)" \
+      "[ '${took% *}' = 200 ] && awk 'BEGIN { exit !(${took#* } < 0.5) }'"
+   check "B2 is then the client's" "receiving | grep -qx '$b/B2/Manifest.mpd:client'"
+
+   stopped=$(grep -c "tuner 0: stopped" "$log")
+   kill "$watcher" 2>/dev/null
+   wait "$watcher" 2>/dev/null
+   released=0
+   for _ in $(seq 1 90); do
+      [ "$(grep -c "tuner 0: stopped" "$log")" -gt "$stopped" ] && { released=1; break; }
+      sleep 1
+   done
+   check "with no client, the pre-buffered services stop and the tuner is released" \
+      "[ $released = 1 ] && [ -z \"\$(receiving)\" ]"
+   stop "$log"
+
+   log="$work/prebuffer-1.log"
+   start "$dir" "$conf" "$log" --prebuffer 1 || { stop "$log"; return; }
+   status "$b/B1/Manifest.mpd" > /dev/null
+   sleep 5
+   check "--prebuffer 1: one channel pre-buffered" "[ \$(receiving | grep -c ':pre$') -eq 1 ]"
+   stop "$log"
+}
+
+# ---------------------------------------------------------------------------------------------------
 
 if curl -s -o /dev/null -m 2 "$base/time"; then
    echo "Port $port is in use; set PORT" >&2
@@ -327,10 +393,10 @@ fi
 echo "Building NippApp with AddressSanitizer"
 make clean > /dev/null && make ASAN=1 > "$work/build.log" 2>&1 || { echo "build failed, see $work/build.log"; KEEP=1; exit 1; }
 
-scenarios="${1:-scans networks change carousels nolist retune}"
+scenarios="${1:-scans networks change carousels nolist retune prebuffer}"
 for scenario in $scenarios; do
    case "$scenario" in
-      scans|networks|change|carousels|nolist|retune) "scenario_$scenario" ;;
+      scans|networks|change|carousels|nolist|retune|prebuffer) "scenario_$scenario" ;;
       *) echo "unknown scenario $scenario" >&2; failures=$((failures + 1)) ;;
    esac
 done

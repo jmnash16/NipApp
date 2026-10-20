@@ -52,8 +52,9 @@ Contents:
 - Captures of DVB-NIP carriers: MPEG transport stream files carrying MPE, or
   PCAP files of IP packets taken from a GSE carrier.
 
-Memory: NippApp keeps received files in memory, up to 256 MB in all (see
-[section 11](#11-limitations)). Allow about 512 MB for the process.
+Memory: NippApp keeps received files in memory, up to 256 MB in all, unless
+large files are sent to disk ([section 4.5](#45-the-disk-store)). Allow about
+512 MB for the process, and disk space for the disk store if you use one.
 
 ## 2. Getting NippApp
 
@@ -256,6 +257,10 @@ only when a client asks for something on it.
 | `-n`, `--name <name>` | the name announced with mDNS | `NippApp on <hostname>` |
 | `-M`, `--no-mdns` | don't announce the gateway with mDNS | announced |
 | `-b`, `--prebuffer <n>` | pre-buffering: `all`, `off`, or the most channels per carrier (see [section 5.3](#53-channel-changes-and-pre-buffering)) | `all` |
+| `-D`, `--store-dir <dir>` | receive large files to disk in this directory, and serve them from there ([section 4.5](#45-the-disk-store)) | every file in memory |
+| `-T`, `--disk-threshold <size>` | files this large or larger go to disk | `4M` |
+| `-L`, `--disk-limit <size>` | the most the disk store holds, at most `4095M` | `2G` |
+| `-a`, `--disk-all` | every service's files of the threshold or more go to disk, live segments included, not only object carousels' | off |
 | `-h`, `--help` | show the options | |
 | `-V`, `--version` | show the version | |
 
@@ -277,6 +282,7 @@ NippApp keeps its state in the working directory (`-d`):
 | `registry/` | every DVB-I document received (entry points, service lists, playlists), at its broadcast path, with its media type in a `.nippapp-type` file beside it |
 | `registry/slep/` | each network's service list entry points, named after the registry entity (e.g. `SES_DVB-NIP.xml`) |
 | `registry/urn/` | documents the broadcast identifies by URN |
+| `disks/nip/store` | with `--store-dir`, a link to the disk store's directory |
 
 To start again from nothing, stop NippApp and delete the working directory.
 To keep the channels but search again, run with `--scan`.
@@ -290,6 +296,39 @@ announcement, stops the HTTP server, saves the database and exits with code
 ```
 NippApp: stopped
 ```
+
+### 4.5 The disk store
+
+By default every received file is kept in memory. Large files from object
+carousels, such as SES's offline videos and PDFs (17-291 MB), don't fit, so
+they need a disk store:
+
+```
+./build/nippapp -d ~/nippapp-data --store-dir /data/nippapp-store
+```
+
+```
+NippApp: disk store in /data/nippapp-store: carousels' files of 4096 KB or more, up to 2048 MB
+```
+
+- Carousel files of 4 MB or more (`--disk-threshold`) are received to disk
+  and served from there. Smaller files and live segments stay in memory.
+- A file that misses packets in one pass of its carousel is completed by
+  later passes, as long as it is still being asked for (the player asks
+  every 5 s while it waits). Once complete, it isn't received again when the
+  carousel comes round, unless it changes.
+- When the store reaches `--disk-limit` (default 2 GB), the oldest complete
+  files are dropped. A file larger than the limit isn't received.
+- Files aren't kept across restarts: NippApp empties the directory of its
+  own files (`nip-1`, `nip-2`, ...) when it starts. Other files in the
+  directory are left alone.
+- `--disk-all` sends every service's files of the threshold or more to disk,
+  live segments included. With `--disk-all --disk-threshold 0`, everything
+  except the signalling goes to disk. This is for a box with little memory;
+  on flash storage, it means many writes.
+
+`/api/status` shows the store's use under `diskStore`
+([section 8.1](#81-get-apistatus)).
 
 ## 5. The web player
 
@@ -382,7 +421,8 @@ picture is shown in place of the video, a video is played as a file, and a
 PDF is shown in a frame.
 
 Files that are only partly in a capture never arrive. Large files (videos,
-PDFs) can't be delivered yet; see [section 11](#11-limitations).
+PDFs) need a disk store ([section 4.5](#45-the-disk-store)); a video from it
+can be seeked, as the gateway answers byte-range requests.
 
 ### 5.5 Content guide
 
@@ -480,6 +520,10 @@ What NippApp changes in what it serves:
 - In DASH manifests, `UTCTiming` points at `/time`, and live manifests get
   `minimumUpdatePeriod` 2 s.
 - Files sent compressed (gzip, zlib, deflate) are served decoded.
+- Large files, files on disk and requests with a `Range` header are sent
+  as they are read, with `Accept-Ranges: bytes`. One byte range is
+  answered with 206 and `Content-Range`; several ranges in one request get
+  the whole file.
 - Manifests and playlists of a service being received carry
   `X-NippApp-Receiving: <seconds>`, how long the gateway has been receiving
   that service. The web player uses it to start a pre-buffered channel at
@@ -534,12 +578,14 @@ being received, the answer is 503 with `Retry-After`.
 | Code | When |
 |---|---|
 | 200 | the file or answer |
+| 206 | the byte range asked for |
 | 302 | `/player` redirects to `/player/` |
 | 400 | an entry point or guide query that isn't valid |
 | 403 | the admin API, asked from another machine without `--admin-from-any` |
 | 404 | a path no broadcast signals (answered at once), or a signalled file that hasn't arrived within 8 s |
 | 405 | a method other than GET or HEAD |
 | 409 | `POST /api/scan` while a scan is running |
+| 416 | a byte range past the end of the file |
 | 501 | a request with `src=DVB-HB` in its query: DVB-HB isn't supported |
 | 503 | not available yet; `Retry-After` says when to try again, and the body says why: `no tuner free` (10 s), `the carrier can't be received (no signal)` (30 s), `waiting for the broadcast carousel` (10 s), `receiving the content guide` |
 
@@ -567,6 +613,7 @@ curl -s http://localhost:8080/api/status | python3 -m json.tool
 | `streams` | each NIP stream (carrier) the signalling names: `network`, `carrier`, `service`, `tuned`, `noTuner`, `noSignal`, `entries` (SIF entries on it), `prebuffered` (how many are) |
 | `streams[].receiving` | each service being received on it: `path`, `clients`, `idleSeconds` since its files were last requested, `bytes` held, `prebuffered` |
 | `fileStore` | the memory used for received files: `bytes`, `files`, `maxBytes` |
+| `diskStore` | the disk store: `enabled`, `bytes` (complete files and files being received), `files` (complete), `maxBytes`, `threshold`, `allServices` |
 | `channels` | channels in the database |
 | `networks` | the networks whose entry points are kept |
 
@@ -660,11 +707,11 @@ copy.
 - **Inputs are recordings.** There is no support for tuner hardware yet. The
   file tuner offers two tuner paths, so two carriers can be received at
   once.
-- **Large files.** Received files are kept in memory: up to 256 MB in all and
-  128 MB per service. Live segments are kept for 30 s (12 s when
-  pre-buffered); carousel files are kept until replaced or over the limits.
-  Large carousel files (videos, PDFs) can't be delivered yet, and byte-range
-  requests aren't answered, so seeking in a video file isn't possible.
+- **Memory.** Without a disk store, received files are kept in memory: up to
+  256 MB in all and 128 MB per service, with no option to change these.
+  Live segments are kept for 30 s (12 s when pre-buffered); carousel files
+  are kept until replaced or over the limits.
+- **Sizes.** A file, and the disk store, are under 4 GB.
 - **DVB-NIP features not supported by DVBCore yet:** ROUTE (only FLUTE is
   received), compressed signalling files, 48-bit TOIs, and for GSE, ROHC and
   GSE-Lite link-layer signalling.
@@ -699,6 +746,21 @@ KEEP=1 tools/asan-check.sh        # keep the logs and working directories
 | `nolist` | a broadcast without DVB-I lists: NippApp's own list |
 | `retune` | an HLS playlist after a re-tune is fresh |
 | `prebuffer` | pre-buffering, channel changes, the no-signal 503, the DASH and HLS services sharing a directory |
+| `disk` | the disk store, with a test capture made by `tools/make-carousel-pcap.py`: a 30 MB carousel file arriving whole, kept on disk, byte ranges, no second reception, the store emptied at startup, the disk limit |
 
 Variables: `CAPTURES` (default `../Streams/DvbNIP` beside NippApp) is where
 the captures are, and `PORT` (default 18080) is the port used.
+
+`tools/make-carousel-pcap.py` makes a test capture with a large file complete
+in an object carousel, since no recording has one. By default it takes SES's
+capture and replaces its video carousel's session with generated packets
+carrying a 30 MB file at the path of SES's `HDplus_ExtraScreen.mp4`:
+
+```
+tools/make-carousel-pcap.py ../Streams/DvbNIP/2025-02-11_1min.pcap /tmp/ses-carousel.pcap
+```
+
+`--file` sends a file of your own (e.g. a real MP4, to watch and seek in the
+player), `--size` sets the generated file's size, and `--content-out` writes
+the file sent, to compare with what the gateway serves. Use the new capture
+in place of SES's in the sources file, with `loop`.

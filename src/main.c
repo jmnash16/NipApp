@@ -48,6 +48,11 @@
  * DVB-I list there, so that the services can be tuned after a restart */
 #define DISKS_DIR          "disks"
 #define NIP_DISK_DIR       "disks/nip"
+/* the disk store: a directory on the NIP library's disk, a link to --store-dir */
+#define STORE_NAME         "store"
+#define STORE_LINK         NIP_DISK_DIR "/" STORE_NAME
+#define DEFAULT_DISK_THRESHOLD   (4u * 1024 * 1024)
+#define DEFAULT_DISK_LIMIT       (2048u * 1024 * 1024)
 
 /*---local (static) variable declarations for this file-----------------------*/
 /* Posted by the signal handler; sem_post is async-signal-safe */
@@ -62,18 +67,31 @@ static BOOLEAN scan_completed = FALSE;
 static time_t scan_finished = 0;
 static time_t started = 0;
 static U16BIT prebuffer = DVBNIP_PREBUFFER_ALL;
+static BOOLEAN disk_store = FALSE;
+static U32BIT disk_threshold = DEFAULT_DISK_THRESHOLD;
+static U32BIT disk_limit = DEFAULT_DISK_LIMIT;
+static BOOLEAN disk_all = FALSE;
 
 /*---local function prototypes for this file----------------------------------*/
 static void Usage(const char *name);
 static void SignalHandler(int sig);
 static BOOLEAN InstallSignalHandlers(void);
 static BOOLEAN FindPlayerDir(const char *given, const char *argv0, char *dir, size_t size);
+static BOOLEAN ParseSize(const char *text, U32BIT *bytes);
+static BOOLEAN LinkStore(const char *dir);
 
 /*---global function definitions---------------------------------------------*/
 
 U16BIT NIPPAPP_GetPrebuffer(void)
 {
    return prebuffer;
+}
+
+BOOLEAN NIPPAPP_GetDiskStore(U32BIT *threshold, BOOLEAN *all_services)
+{
+   *threshold = disk_threshold;
+   *all_services = disk_all;
+   return disk_store;
 }
 
 BOOLEAN NIPPAPP_RequestScan(void)
@@ -158,6 +176,10 @@ int main(int argc, char *argv[])
       {"name", required_argument, NULL, 'n'},
       {"no-mdns", no_argument, NULL, 'M'},
       {"prebuffer", required_argument, NULL, 'b'},
+      {"store-dir", required_argument, NULL, 'D'},
+      {"disk-threshold", required_argument, NULL, 'T'},
+      {"disk-limit", required_argument, NULL, 'L'},
+      {"disk-all", no_argument, NULL, 'a'},
       {"help", no_argument, NULL, 'h'},
       {"version", no_argument, NULL, 'V'},
       {NULL, 0, NULL, 0}
@@ -169,6 +191,8 @@ int main(int argc, char *argv[])
    const char *port = DEFAULT_PORT;
    const char *player_arg = NULL;
    char player_dir[PATH_MAX];
+   const char *store_arg = NULL;
+   char store_dir[PATH_MAX];
    BOOLEAN force_scan = FALSE;
    BOOLEAN admin_from_any = FALSE;
    BOOLEAN mdns = TRUE;
@@ -180,7 +204,7 @@ int main(int argc, char *argv[])
    /* Line-buffered output, so that progress shows when the output goes to a file */
    setvbuf(stdout, NULL, _IOLBF, 0);
 
-   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:P:An:Mb:hV", long_opts, NULL)) != -1)
+   while ((opt = getopt_long(argc, argv, "d:s:Sc:p:P:An:Mb:D:T:L:ahV", long_opts, NULL)) != -1)
    {
       switch (opt)
       {
@@ -231,6 +255,26 @@ int main(int argc, char *argv[])
                prebuffer = (U16BIT)max;
             }
             break;
+         case 'D':
+            store_arg = optarg;
+            break;
+         case 'T':
+            if (!ParseSize(optarg, &disk_threshold))
+            {
+               fprintf(stderr, "NippApp: --disk-threshold takes a size, e.g. 4M\n");
+               return 1;
+            }
+            break;
+         case 'L':
+            if (!ParseSize(optarg, &disk_limit) || (disk_limit == 0))
+            {
+               fprintf(stderr, "NippApp: --disk-limit takes a size up to 4095M, e.g. 2G\n");
+               return 1;
+            }
+            break;
+         case 'a':
+            disk_all = TRUE;
+            break;
          case 'V':
             printf("NippApp %s\n", NIPPAPP_VERSION);
             return 0;
@@ -248,6 +292,16 @@ int main(int argc, char *argv[])
    {
       fprintf(stderr, "NippApp: sources file '%s': %s\n", sources_file, strerror(errno));
       return 1;
+   }
+
+   /* The disk store's directory, named relative to where NippApp was started, before -d */
+   if (store_arg != NULL)
+   {
+      if (((mkdir(store_arg, 0755) != 0) && (errno != EEXIST)) || (realpath(store_arg, store_dir) == NULL))
+      {
+         fprintf(stderr, "NippApp: store directory '%s': %s\n", store_arg, strerror(errno));
+         return 1;
+      }
    }
 
    /* The player's files are next to the executable (build/nippapp -> player/), unless given; found
@@ -268,6 +322,10 @@ int main(int argc, char *argv[])
        ((mkdir(NIP_DISK_DIR, 0755) != 0) && (errno != EEXIST)))
    {
       fprintf(stderr, "NippApp: cannot create %s: %s\n", NIP_DISK_DIR, strerror(errno));
+      return 1;
+   }
+   if ((store_arg != NULL) && !LinkStore(store_dir))
+   {
       return 1;
    }
 
@@ -306,6 +364,20 @@ int main(int argc, char *argv[])
    else if (prebuffer != 0)
    {
       printf("NippApp: pre-buffering up to %u channels on the carrier being received\n", (unsigned)prebuffer);
+   }
+
+   /* Large files (a carousel's videos and documents) are received to disk and served from there */
+   if (store_arg != NULL)
+   {
+      disk_store = DVBNIP_SetDiskStore((const U8BIT *)STORE_NAME, disk_threshold, disk_limit, disk_all);
+      if (!disk_store)
+      {
+         fprintf(stderr, "NippApp: the disk store in %s can't be used\n", store_dir);
+         return 1;
+      }
+      printf("NippApp: disk store in %s: %s files of %lu KB or more, up to %lu MB\n", store_dir,
+         disk_all ? "every service's" : "carousels'", (unsigned long)(disk_threshold >> 10),
+         (unsigned long)(disk_limit >> 20));
    }
 
    if (!NIPPAPP_SetupCountry(country) || !REG_Init())
@@ -388,6 +460,12 @@ static void Usage(const char *name)
       "  -b, --prebuffer <n>    while a channel is received, also receive the other channels on\n"
       "                         its carrier for a faster channel change: all (default), off, or\n"
       "                         the most channels\n"
+      "  -D, --store-dir <dir>  receive large files to disk in this directory and serve them\n"
+      "                         from there (default: every file in memory)\n"
+      "  -T, --disk-threshold <size>  files this large or larger go to disk (default 4M)\n"
+      "  -L, --disk-limit <size>      the most the disk store holds (default 2G, at most 4095M)\n"
+      "  -a, --disk-all         every service's large files go to disk, live segments included,\n"
+      "                         not only object carousels'\n"
       "  -h, --help             show this help\n"
       "  -V, --version          show the version\n", name, DEFAULT_SOURCES, DEFAULT_COUNTRY, DEFAULT_PORT);
 }
@@ -449,6 +527,71 @@ static BOOLEAN FindPlayerDir(const char *given, const char *argv0, char *dir, si
    *slash = '\0';
    snprintf(candidate, sizeof(candidate), "%s/player", exe);
    return ((realpath(candidate, dir) != NULL) && (strlen(dir) < size));
+}
+
+/* A size: bytes, or with K, M or G (binary multiples); below 4G */
+static BOOLEAN ParseSize(const char *text, U32BIT *bytes)
+{
+   unsigned long long value;
+   char *end;
+
+   value = strtoull(text, &end, 10);
+   if ((end == text) || (text[0] == '-'))
+   {
+      return FALSE;
+   }
+   switch (*end)
+   {
+      case 'k':
+      case 'K':
+         value <<= 10;
+         end++;
+         break;
+      case 'm':
+      case 'M':
+         value <<= 20;
+         end++;
+         break;
+      case 'g':
+      case 'G':
+         value <<= 30;
+         end++;
+         break;
+      default:
+         break;
+   }
+   if ((*end != '\0') || (value > 0xffffffffULL))
+   {
+      return FALSE;
+   }
+   *bytes = (U32BIT)value;
+   return TRUE;
+}
+
+/* The disk store is a directory on the NIP library's disk (disks/nip/store): a link to the
+ * directory given, so that it can be on any disk */
+static BOOLEAN LinkStore(const char *dir)
+{
+   struct stat info;
+
+   if (lstat(STORE_LINK, &info) == 0)
+   {
+      if (S_ISLNK(info.st_mode))
+      {
+         unlink(STORE_LINK);
+      }
+      else if (rmdir(STORE_LINK) != 0)
+      {
+         fprintf(stderr, "NippApp: %s is in the way of the store directory: %s\n", STORE_LINK, strerror(errno));
+         return FALSE;
+      }
+   }
+   if (symlink(dir, STORE_LINK) != 0)
+   {
+      fprintf(stderr, "NippApp: cannot link %s to %s: %s\n", STORE_LINK, dir, strerror(errno));
+      return FALSE;
+   }
+   return TRUE;
 }
 
 /******************************************************************************

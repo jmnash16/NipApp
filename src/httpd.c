@@ -538,6 +538,10 @@ static void RewriteMPD(struct mg_connection *conn, char *mpd)
 #define AAC_SYNC_EXTENSION    0x2b7
 #define AAC_PLAIN_CONFIG_LEN  2
 #define MAX_INIT_SEGMENT_LEN  65536
+/* Files at least this long, or on disk, or asked for by byte range, are sent in parts as they are
+ * read rather than copied whole, unless they are rewritten or decoded */
+#define STREAM_MIN_LEN        (1024 * 1024)
+#define STREAM_CHUNK          (256 * 1024)
 
 static void SetWord32(U8BIT *p, U32BIT value)
 {
@@ -678,6 +682,138 @@ static U32BIT FixAACConfig(U8BIT *data, U32BIT len)
  * Files from the NIP file store
  */
 
+static BOOLEAN IsManifestOrPlaylist(const char *path, const char *filetype);
+
+/* Whether a file is sent in parts as it is read (SendStream) rather than copied whole: one that is
+ * served as broadcast (not a manifest, playlist or DVB-I document, which are rewritten, nor a
+ * compressed file, which is decoded, nor an init segment, which may get the AAC fix), when it is
+ * large, on disk, or asked for by byte range */
+static BOOLEAN IsStreamable(struct mg_connection *conn, const char *path, const char *filetype, const U8BIT *encoding,
+   U32BIT len, BOOLEAN on_disk)
+{
+   if ((encoding != NULL) || IsManifestOrPlaylist(path, filetype) || REG_IsDvbiType(filetype) ||
+       ((filetype != NULL) && (strstr(filetype, "mp4") != NULL) && (len < MAX_INIT_SEGMENT_LEN)))
+   {
+      return FALSE;
+   }
+   return (on_disk || (len >= STREAM_MIN_LEN) || (mg_get_header(conn, "Range") != NULL)) ? TRUE : FALSE;
+}
+
+/* A Range header with one byte range (RFC 9110 clause 14.1.2): 1 with its first and last byte, 0 to
+ * send the whole file (no range, or one this server doesn't take, e.g. several ranges), -1 if it
+ * can't be satisfied */
+static int ParseRange(const char *range, U32BIT len, U32BIT *first, U32BIT *last)
+{
+   unsigned long a, b;
+   char *end;
+
+   if ((range == NULL) || (strncasecmp(range, "bytes=", 6) != 0) || (strchr(range, ',') != NULL))
+   {
+      return 0;
+   }
+   range += 6;
+   while (*range == ' ')
+   {
+      range++;
+   }
+   if (*range == '-')
+   {
+      /* the last b bytes */
+      b = strtoul(range + 1, &end, 10);
+      if ((end == range + 1) || (b == 0))
+      {
+         return (end == range + 1) ? 0 : -1;
+      }
+      if (len == 0)
+      {
+         return -1;
+      }
+      *first = (b >= len) ? 0 : len - (U32BIT)b;
+      *last = len - 1;
+      return 1;
+   }
+   a = strtoul(range, &end, 10);
+   if ((end == range) || (*end != '-'))
+   {
+      return 0;
+   }
+   if (a >= len)
+   {
+      return -1;
+   }
+   *first = (U32BIT)a;
+   range = end + 1;
+   b = strtoul(range, &end, 10);
+   *last = ((end == range) || (b >= len)) ? len - 1 : (U32BIT)b;
+   return (*last < *first) ? 0 : 1;
+}
+
+/* Send a file opened with DVBNIP_OpenFile in parts as it is read, the whole file (200) or the byte
+ * range asked for (206) */
+static void SendStream(struct mg_connection *conn, void *file, U32BIT len, const char *filetype)
+{
+   U32BIT first = 0, last = (len > 0) ? len - 1 : 0, offset, size, got;
+   U8BIT *buffer;
+   int range;
+
+   range = ParseRange(mg_get_header(conn, "Range"), len, &first, &last);
+   if (range < 0)
+   {
+      mg_printf(conn,
+         "HTTP/1.1 416 Range Not Satisfiable\r\n"
+         "Content-Range: bytes */%u\r\n"
+         "Content-Length: 0\r\n"
+         "Access-Control-Allow-Origin: *\r\n"
+         "\r\n", (unsigned)len);
+      return;
+   }
+   size = (len > 0) ? last - first + 1 : 0;
+   if (range > 0)
+   {
+      mg_printf(conn,
+         "HTTP/1.1 206 Partial Content\r\n"
+         "Content-Type: %s\r\n"
+         "Content-Length: %u\r\n"
+         "Content-Range: bytes %u-%u/%u\r\n"
+         "Accept-Ranges: bytes\r\n"
+         "Access-Control-Allow-Origin: *\r\n"
+         "Access-Control-Expose-Headers: Content-Range, Accept-Ranges\r\n"
+         "\r\n", (filetype == NULL) ? "application/octet-stream" : filetype, (unsigned)size,
+         (unsigned)first, (unsigned)last, (unsigned)len);
+   }
+   else
+   {
+      mg_printf(conn,
+         "HTTP/1.1 200 OK\r\n"
+         "Content-Type: %s\r\n"
+         "Content-Length: %u\r\n"
+         "Accept-Ranges: bytes\r\n"
+         "Access-Control-Allow-Origin: *\r\n"
+         "Access-Control-Expose-Headers: Accept-Ranges\r\n"
+         "\r\n", (filetype == NULL) ? "application/octet-stream" : filetype, (unsigned)size);
+   }
+   if ((size == 0) || (strcmp(mg_get_request_info(conn)->request_method, "HEAD") == 0))
+   {
+      return;
+   }
+
+   buffer = (U8BIT *)malloc(STREAM_CHUNK);
+   if (buffer == NULL)
+   {
+      return;
+   }
+   for (offset = first; offset <= last; offset += got)
+   {
+      got = DVBNIP_ReadFile(file, offset, buffer, ((last - offset + 1) < STREAM_CHUNK) ? last - offset + 1 : STREAM_CHUNK);
+      /* a short read leaves the response short, which the client sees as a broken transfer */
+      if ((got == 0) || (mg_write(conn, buffer, got) != (int)got))
+      {
+         break;
+      }
+   }
+   free(buffer);
+}
+
 /* prefer_registry: serve the registry's copy before the NIP library's. For the entry points,
  * which the registry keeps whatever location they came with, the NIP library may hold an older
  * network's under the URN. */
@@ -710,6 +846,8 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
    U32BIT receiving_s;
    BOOLEAN from_registry;
    BOOLEAN data_malloced;
+   BOOLEAN on_disk = FALSE;
+   void *nip_file = NULL;
    int filter;
 
    /* The NIP library's copy is the latest. Without one, a DVB-I document is served from the
@@ -717,7 +855,8 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
     * shortly and is waited for before answering 404. */
    from_registry = prefer_registry && REG_Load(path, &data, &len, (char **)&filetype);
    waited = 0;
-   while (!from_registry && !DVBNIP_CopyFileEncoded((const U8BIT *)path, &data, &len, &filetype, &encoding))
+   while (!from_registry &&
+          (nip_file = DVBNIP_OpenFile((const U8BIT *)path, &len, &filetype, &encoding, &on_disk)) == NULL)
    {
       if (REG_Load(path, &data, &len, (char **)&filetype))
       {
@@ -760,6 +899,41 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
       }
       usleep(HOLD_STEP_MS * 1000);
       waited += HOLD_STEP_MS;
+   }
+
+   if (nip_file != NULL)
+   {
+      /* a large file (a carousel's video) is sent as it is read, in the byte range asked for */
+      if (IsStreamable(conn, path, (const char *)filetype, encoding, len, on_disk))
+      {
+         SendStream(conn, nip_file, len, (const char *)filetype);
+         DVBNIP_CloseFile(nip_file);
+         if (filetype != NULL)
+         {
+            STB_FreeMemory(filetype);
+         }
+         return;
+      }
+      data = (U8BIT *)STB_GetMemory(len + 1);
+      if (data != NULL)
+      {
+         len = DVBNIP_ReadFile(nip_file, 0, data, len);
+         data[len] = '\0';
+      }
+      DVBNIP_CloseFile(nip_file);
+      if (data == NULL)
+      {
+         if (filetype != NULL)
+         {
+            STB_FreeMemory(filetype);
+         }
+         if (encoding != NULL)
+         {
+            STB_FreeMemory(encoding);
+         }
+         SendResponse(conn, 500, "Internal Server Error", "text/plain", NULL, NULL, 0);
+         return;
+      }
    }
 
    /* A file sent compressed is served decoded, so DVB-I documents can still be rewritten; one that

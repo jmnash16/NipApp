@@ -433,11 +433,10 @@ more to come round). A picture is shown in place of the video, a video is
 played as a file by the video element, and a PDF is shown in a frame (a new
 tab opened after waiting would be stopped by pop-up blockers). The pictures
 and covers that are complete in the SES capture are shown (a picture after
-up to a minute). The videos (17-291 MB) and PDFs (30-115 MB) can't be
-delivered yet: the capture holds at most 16 MB of each, the file store keeps
-files in memory with limits of 128 MB per service and 256 MB in all, and
-seeking in a video needs byte range requests, which the server doesn't
-answer.
+up to a minute). The videos (17-291 MB) and PDFs (30-115 MB) aren't
+complete in the capture, which holds at most 16 MB of each. With a disk store
+(see Disk store) a large file is received to disk, and served from there with
+byte ranges, so the video element can seek; tested with a generated capture.
 
 A DASH instance whose URL has `src=DVB-HB` in its query (VandVD1 in
 Eutelsat's list) is a TS broadcast service that a DVB-HB gateway would tune
@@ -607,11 +606,9 @@ Still to do:
 
 - One NIF: the NIP library keeps the last one received. It only adds
   transports to the database, so nothing is lost when it is replaced.
-- Large carousel files (SES's videos and PDFs): keep them on disk rather than
-  in memory, answer byte range requests, and test with a capture that holds
-  them complete. (A carousel file still on its way is now answered 503 with
-  `Retry-After: 10`; a later refinement could take the delay from the
-  carousel's `targetAcquisitionLatency`.)
+- Large carousel files: done, see Disk store. (A carousel file still on its
+  way is answered 503 with `Retry-After: 10`; a later refinement could take
+  the delay from the carousel's `targetAcquisitionLatency`.)
 - VandVD1 (DVB-HB) and OTT instances can't be played through the gateway.
 
 ## Milestone 5 progress
@@ -878,6 +875,74 @@ IPv4-mapped addresses), and the library is started and stopped with
 `mg_init_library` and `mg_exit_library`. Every request is still answered by
 NippApp's own handler.
 
+## Disk store
+
+Done 2026-10-20. Files were kept in memory only, within 256 MB in all and
+128 MB per service, and served by copying each one whole into a buffer
+first. SES's carousel videos and PDFs (17-291 MB) can't be kept that way,
+and the video element needs byte ranges to seek.
+
+With `--store-dir <dir>`, large files are received to disk and served from
+there:
+
+- **Which files.** An object carousel's files of `--disk-threshold` (default
+  4 MB) or more. Live segments stay in memory: they are kept for seconds,
+  and writing them to disk would only add disk traffic and, on an STB, flash
+  wear. `--disk-all` sends every service's files of the threshold or more to
+  disk, for a box with little memory (with `--disk-threshold 0`, everything
+  but the signalling). `--disk-limit` (default 2 GB, at most 4095 MB) is the
+  most the store holds; complete files are dropped oldest first beyond it,
+  and a file larger than it isn't received.
+- **Receiving** (`flute.c`). A session's store policy (`FLUTE_STORE_POLICY`,
+  `StorePolicy` in `nip_mgr.c`) chooses memory, disk or neither for each
+  file its FDT announces. A file on disk has its packets appended to its file
+  as they arrive, in any order, with an index in memory in block number order
+  (16 bytes per 1 KB packet). Block order is data order, but a block's
+  position can't be worked out from the FEC payload ID without the FEC
+  parameters, so positions are worked out from the index once the file is
+  complete, and reads go through the index. No copy is made at completion,
+  so the receive thread isn't held up.
+- **Carousel passes.** An incomplete file on disk is kept for 10 minutes
+  without packets (30 s for one in memory), so a file missing packets in one
+  pass of its carousel is completed by later passes. A complete file isn't
+  received again when the carousel comes round, unless its length or its
+  FDT's Content-MD5 changes. Partial files go when their session stops (20 s
+  after the file was last asked for); complete ones stay in the store.
+- **Serving** (`httpd.c`). Files are opened (`DVBNIP_OpenFile`), read in
+  parts (`DVBNIP_ReadFile`) and closed. The file store keeps a reference
+  count, so a file being sent isn't freed when it is replaced or dropped.
+  A file on disk, one of 1 MB or more, or one asked for with a `Range`
+  header is sent as it is read, in 256 KB pieces: 200 with
+  `Accept-Ranges: bytes`, 206 with `Content-Range` for one byte range, 416
+  for a range past the end. Several ranges in one request get the whole
+  file. Documents NippApp rewrites (MPDs, playlists, DVB-I documents),
+  compressed files and init segments are still read whole, as before.
+  This applies to memory files too.
+- **Storage.** The store is a directory on the NIP library's disk,
+  `disks/nip/store`, which NippApp links to `--store-dir`. Files are named
+  `nip-<n>` and not kept across restarts: the directory is emptied of them at
+  startup. All access goes through the platform's disk API (`STB_DSK*`).
+- **Status.** `/api/status` has `diskStore`: `enabled`, `bytes` (complete
+  files and files being received), `files` (complete), `maxBytes`,
+  `threshold`, `allServices`.
+
+Tested with `tools/make-carousel-pcap.py`, which makes a capture with a
+large file complete in a carousel: SES's capture with its video carousel
+session (224.0.49.5:49005, TSI 49005) replaced by generated FLUTE packets
+in SES's own LCT format. A 30 MB file is sent at the path of
+`HDplus_ExtraScreen.mp4`, twice per 64 s loop, the first copy missing every
+37th packet. The file arrived in 64 s, identical to the original, with
+110 KB of memory used. A 1 MB range from its middle took 1.6 ms. The next pass
+didn't receive it again. With `--disk-all --disk-threshold 0`, SES's live
+segments were served from disk (17 MB on disk, 224 KB in memory).
+`tools/asan-check.sh disk` checks the arrival, that the file is on disk,
+ranges, the 416, no second reception, the store emptied at startup, and a
+file larger than `--disk-limit` not received.
+
+Limits: sizes are 32-bit, as in FLUTE (`flute.c` keeps 32-bit lengths), so a
+file and the store are under 4 GB. The memory store's limits still have no
+option (see STB Implementation).
+
 ## STB Implementation
 
 Reviewed 2026-10-20: can NippApp run on a set-top box, given front-end
@@ -969,11 +1034,15 @@ Suggested route:
 Committed: milestones 1-5 (but the same-clock test) and Phase B, including
 civetweb and the corrections from checking TS 103 770.
 
+Committed since: pre-buffering, the no-signal 503, the DASH/HLS directory
+fix, the user manual and the architecture document.
+
 Not committed yet:
 
-- Pre-buffering: DVBCore `dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`;
-  NippApp `src/main.c`, `src/admin.c`, `inc/nippapp.h`,
-  `tools/asan-check.sh`, this file.
+- Disk store: DVBCore `dvbnip/inc/flute.h`, `dvbnip/src/flute.c`,
+  `dvbnip/inc/nip_mgr.h`, `dvbnip/src/nip_mgr.c`; NippApp `src/main.c`,
+  `src/httpd.c`, `src/admin.c`, `inc/nippapp.h`, `tools/asan-check.sh`,
+  `tools/make-carousel-pcap.py` (new), this file and `docs/`.
 - dvbi-client-js (`~/dvbi-client-js`, remote `DTVKit/dvbi-client-js`):
   `src/service-list.js`, `test/parsers.test.js` (file deliveries, which the
   player needs for SES's offline content).
@@ -999,11 +1068,7 @@ changes.
 
 Milestone 5 still needs captures of two carriers with the same clock.
 
-Next: disk caching of large files, then revisit "STB Implementation" above (agreed design: carousel files over a size
-threshold received to a partial file on disk and served from it with byte
-ranges; live segments stay in RAM unless asked; `--store-dir`,
-`--disk-threshold`, `--disk-limit`; a FLUTE PCAP generator to test it, as no
-capture holds large files complete). Then the rest of Phase B: an independent DVB-I client (Jason's STB, its
+Next: revisit "STB Implementation" above. Then the rest of Phase B: an independent DVB-I client (Jason's STB, its
 service list endpoints set by hand; best with NippApp on a separate Linux PC,
 see "Running on a separate Linux PC"; the mDNS TXT format is still to
 confirm). Optional later: DVB-HB support (VandVD1).

@@ -73,6 +73,14 @@ void NIPPAPP_GetScanState(BOOLEAN *running, BOOLEAN *completed, time_t *finished
 U16BIT NIPPAPP_GetPrebuffer(void);
 
 /**
+ * @brief   The disk store setting (--store-dir), for status
+ * @param   threshold returns the size from which files go to disk
+ * @param   all_services returns TRUE if every service's files can go to disk (--disk-all)
+ * @return  TRUE if there is a disk store
+ */
+BOOLEAN NIPPAPP_GetDiskStore(U32BIT *threshold, BOOLEAN *all_services);
+
+/**
  * @brief   Prints the services in the database
  */
 void NIPPAPP_PrintServices(void);

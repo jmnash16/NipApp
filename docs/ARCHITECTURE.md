@@ -174,7 +174,7 @@ rest are empty.
 |---|---|
 | `player/` | The web player (`player.html`), and `vendor/` (built by `tools/build-player.sh`, not in git): dvbi-client-js, dash.js 4.7.4, hls.js 1.5.20 |
 | `third_party/civetweb/` | civetweb 1.16 (MIT), built without TLS, CGI and file serving; every request goes to NippApp's handler |
-| `tools/` | `build-player.sh`, `package.sh` (portable tarball), `asan-check.sh` (AddressSanitizer test scenarios) |
+| `tools/` | `build-player.sh`, `package.sh` (portable tarball), `asan-check.sh` (AddressSanitizer test scenarios), `make-carousel-pcap.py` (a test capture with a large carousel file) |
 
 ## 5. DVBCore's components
 
@@ -196,7 +196,7 @@ rest are empty.
 | `inc/nip_mgr.h` | The library's public API (`DVBNIP_*`) |
 | `src/nip_mgr.c` | The NIP manager: the service table (NIP streams and the services on each, from the NIF and SIFs), FLUTE session management, the file store and its limits, on-demand service start and stop, pre-buffering, the broadcast wall clock, persistence of the signalling, putting services into the database, garbage collection |
 | `src/nip_task.c` | The NIP task: one thread with a message queue. It tunes and releases NIP streams (MPE and GSE acquisitions), finds the MPE PID from the PAT and PMT after a restart, follows tuner lock, starts and stops services, and runs the garbage collector |
-| `src/flute.c` | FLUTE reception: LCT/ALC packets, the FDT, file reassembly, EXT_TIME |
+| `src/flute.c` | FLUTE reception: LCT/ALC packets, the FDT, file reassembly into memory or the disk store, EXT_TIME |
 | `src/gse.c` | GSE decapsulation of a GSE carrier's data into IP packets |
 | `src/nip_xml.c` | Parsing of the NIP signalling: NIF, SIF, gateway configurations (including object carousels), DVB-I service lists |
 | `src/nip_misc.c` | Path matching and helpers |
@@ -213,7 +213,10 @@ The NIP manager's main structures:
   memory used). An object carousel's entry also keeps the list of resources
   it carries.
 - **File store**: every file FLUTE has delivered, by path, with its type,
-  encoding, owner service and receive times.
+  encoding, owner service, receive times and a count of readers holding it
+  open. A file's data is in memory (a list of received blocks) or, with a
+  disk store, in a file on disk with an index of its blocks in memory (see
+  [section 8.7](#87-the-disk-store)).
 
 ## 6. Interfaces between NippApp and DVBCore
 
@@ -249,7 +252,8 @@ flowchart TB
 
 | Call | Used for |
 |---|---|
-| `DVBNIP_CopyFileEncoded`, `DVBNIP_CopyFile` | Get a received file by path, with its type and content encoding. **A request for a path under a service starts that service**, which tunes its carrier on demand. A manifest that lists segments received before its service last started isn't returned. |
+| `DVBNIP_OpenFile`, `DVBNIP_ReadFile`, `DVBNIP_CloseFile` | Open a received file by path, read it in parts, close it: how `httpd.c` serves files, whole or in byte ranges. **Opening a path under a service starts that service**, which tunes its carrier on demand. A manifest that lists segments received before its service last started isn't returned. The file is kept until closed. |
+| `DVBNIP_CopyFileEncoded`, `DVBNIP_CopyFile` | Copy a received file whole, with its type and content encoding (the guide and the registry). Also starts the service. |
 | `DVBNIP_IsPathSignalled` | Whether any SIF lists the path, or a directory or service it is under: if not, 404 at once |
 | `DVBNIP_IsTunerUnavailable` | Whether the path's carrier couldn't be tuned for want of a tuner: 503 |
 | `DVBNIP_IsCarrierUnreceivable` | Whether the path's carrier didn't lock: 503 |
@@ -262,6 +266,7 @@ flowchart TB
 | `DVBNIP_ListCarouselResources` | The files a guide carousel carries |
 | `DVBNIP_ListStreams`, `DVBNIP_GetStoreUsage` | Streams, services being received and memory use, for `/api/status` |
 | `DVBNIP_SetPrebuffer` | The most channels pre-buffered per stream (`--prebuffer`) |
+| `DVBNIP_SetDiskStore`, `DVBNIP_GetDiskStoreUsage` | The disk store (`--store-dir`, `--disk-threshold`, `--disk-limit`, `--disk-all`), and its use for `/api/status` |
 
 NippApp never tunes directly. Every tune is started by DVBCore, either by a
 search or by the NIP library when a request needs a carrier.
@@ -283,7 +288,7 @@ code in NippApp:
 | Tuner | `STB_TuneInitialise`, `STB_TuneStartTuner`, `STB_TuneStopTuner`, `STB_TuneSetGSEDataCallback`, `STB_TuneGet*` | The file tuner: finds the source matching the tune (RF frequency from the IF and the LNB's local oscillator, polarisation from the LNB voltage), reports lock or no lock, starts the feeder thread |
 | Demux | `STB_DMXInitialise`, `STB_DMXGrabPIDFilter`, `STB_DMXGrabSectFilter`, `STB_DMXSetupSectFilter`, `STB_DMXStartPIDFilter`, `STB_DMXCopyPIDFilterSect`, ... | Section filtering on the TS packets the file tuner feeds |
 | OS | `STB_OSCreateTask`, `STB_OSCreateMutex`, `STB_OSCreateQueue`, `STB_OSReadQueue`, `STB_OSSendEvent`, `STB_OSGetClockMilliseconds`, ... | Linux threads and primitives |
-| Storage | `STB_DSKOpenFile`, `STB_DSKReadFile`, `STB_DSKWriteFile`, ... | Files under `disks/` in the working directory |
+| Storage | `STB_DSKOpenFile`, `STB_DSKReadFile`, `STB_DSKWriteFile`, `STB_DSKSeekFile`, ... | Files under `disks/` in the working directory: the NIP library's signalling, and the disk store |
 | Memory, network, NVM | `STB_GetMemory`, `STB_IP*`, ... | Linux |
 | AV, OSD, PVR, front panel, VBI | | Empty stubs |
 
@@ -341,8 +346,13 @@ Concurrency rules:
   Anything that tunes or starts a service is sent as a message to the NIP
   task (`NIPTASK_STARTSERVICE`, `NIPTASK_STARTACQUISITION`, `NIPTASK_LOCK`,
   ...), so acquisitions are only changed on that one thread.
-- Files are copied out of the file store (`DVBNIP_CopyFileEncoded`), so an HTTP
-  worker never holds the store's lock while it sends.
+- An HTTP worker holds a reference to the file it sends (`DVBNIP_OpenFile`),
+  not the store's lock, so sending a large file doesn't hold up reception.
+  A complete file's data doesn't change, so it is read without the lock. A
+  file replaced or dropped while it is open is freed when it is closed.
+- Data written to the disk store is written on the receiving thread (the
+  demux or PCAP feeder), appended to the file, with no copy when it
+  completes.
 - A search runs on the main thread while HTTP workers keep serving.
 
 ## 8. Data flows
@@ -443,8 +453,12 @@ sequenceDiagram
 
 `SendFile` (`httpd.c`) decides the answer:
 
-1. Ask the NIP library for the file. If it is there, or the registry has a
-   copy of a DVB-I document, serve it.
+1. Open the file in the NIP library (`DVBNIP_OpenFile`). If it is there, or
+   the registry has a copy of a DVB-I document, serve it: a file on disk, one
+   of 1 MB or more, or one asked for with a `Range` header is sent as it is
+   read, in 256 KB pieces, whole (200) or the byte range asked for (206), as
+   long as NippApp doesn't rewrite or decode it; anything else is read whole
+   and served as below.
 2. If no SIF signals the path, answer 404 at once.
 3. If the carrier has no tuner free, answer 503 (`Retry-After: 10`). If it
    didn't lock, answer 503 (`Retry-After: 30`).
@@ -517,6 +531,44 @@ There is one clock. With live reception every carrier has the same time; with
 recordings from different times, it follows whichever carrier sent EXT_TIME
 last.
 
+### 8.7 The disk store
+
+With `--store-dir`, files that don't fit in memory are received to disk:
+
+```mermaid
+flowchart LR
+    FDT["FDT announces a file"] --> P{"store policy<br/>(nip_mgr.c StorePolicy)"}
+    P -- "small, or live segment" --> MEM["memory blocks"]
+    P -- "carousel file ≥ threshold<br/>(any service's with --disk-all)" --> DISK["disk file nip-N<br/>+ block index in memory"]
+    P -- "complete copy on disk<br/>(same length and MD5),<br/>or larger than the store" --> SKIP["not received"]
+    MEM --> FS["file store"]
+    DISK --> FS
+    FS --> H["DVBNIP_OpenFile / ReadFile<br/>(byte ranges)"]
+```
+
+- **The decision** is made per file when its FDT entry is parsed:
+  `FLUTE_RegisterStorePolicy` gives each service session NIP manager's
+  `StorePolicy`, which returns memory, disk or skip. Signalling sessions have
+  no policy, so the NIF, SIF, gateway configurations and lists are always in
+  memory.
+- **Writing.** A disk file's packets are appended to `nip-<n>` as they
+  arrive, and a sorted array in memory indexes them by block number (16
+  bytes per 1 KB packet). The FEC payload ID gives the data's order, but not
+  its position without the FEC parameters. Once the file is complete, each
+  block's position in the object is worked out from the index, and reads
+  find their blocks by binary search. Nothing is copied at completion.
+- **Carousel passes.** An incomplete disk file is kept for 10 minutes without
+  packets (`DISK_FILE_TIMEOUT`, against 30 s in memory), so later passes of
+  the carousel fill its gaps. The policy skips a file already complete on
+  disk with the same length and Content-MD5.
+- **Limits.** Memory files count against the memory limits, disk files
+  against `--disk-limit`; the garbage collector drops the oldest complete
+  disk files when the store is over its limit.
+- **Location.** The store is `store/` on the NIP library's disk
+  (`disks/nip/store`), a link NippApp makes to `--store-dir`, accessed only
+  through the platform's disk API. It is emptied of `nip-*` files at
+  startup.
+
 ## 9. Service and tuner lifecycle
 
 ### 9.1 States
@@ -550,6 +602,9 @@ waiting for a tuner can take one that is only waiting to be released.
 | 30 s | `DEFAULT_MAX_AGE_CONTENT` | A received file is kept this long (carousel files: until replaced) |
 | 12 s | `PREBUFFER_MAX_AGE` | A pre-buffered service's files are kept this long |
 | 30 s | `FLUTE_FILE_TIMEOUT` | An incomplete file that has received nothing for this long is dropped |
+| 600 s | `DISK_FILE_TIMEOUT` | The same for a file being received to disk, so later passes of its carousel can complete it |
+| 4 MB, 2 GB | `main.c` `DEFAULT_DISK_THRESHOLD`, `DEFAULT_DISK_LIMIT` | The size from which carousel files go to disk, and the disk store's limit (`--disk-threshold`, `--disk-limit`) |
+| 1 MB, 256 KB | `httpd.c` `STREAM_MIN_LEN`, `STREAM_CHUNK` | The size from which a file is sent as it is read rather than copied whole, and the pieces it is read in |
 | 256 MB, 128 MB | `DEFAULT_MAX_MEMORY_USAGE`, `DEFAULT_MAX_SERVICE_MEMORY_USAGE` | The file store's total and per-service limits; the oldest files go first |
 | 10 s, 30 s, 10 s | `httpd.c` | `Retry-After` for no tuner, no signal, a carousel file |
 | 180 s | `search.c` | The limit on one search |
@@ -598,11 +653,12 @@ side. A file that is neither's manifest goes to the one being received
 | Settings (country) | DVBCore | `nvm.dat` |
 | NIF, SIFs, DVB-I lists | NIP library | `disks/nip/` (`nif.xml`, `sif*.xml`, `dvbisl*.xml` + `.loc`) |
 | DVB-I documents | NippApp registry | `registry/` |
+| Large received files | NIP library (FLUTE) | `disks/nip/store` → `--store-dir`; not kept across restarts |
 | Entry points per network | NippApp registry | `registry/slep/` |
 
 At startup the NIP library rebuilds its service table from `disks/nip/`, so
-services can be tuned after a restart without a search. The file store is in
-memory only.
+services can be tuned after a restart without a search. The file store
+isn't kept across restarts, on disk or in memory.
 
 ## 11. Build and dependencies
 
@@ -655,10 +711,6 @@ see tuner paths, lock events and data.
 
 ### 12.2 Planned work
 
-- **Disk storage of large files:** carousel files above a size threshold
-  received into a partial file on disk and served from it, with byte-range
-  requests. This changes the file store in `nip_mgr.c` and `flute.c`, and
-  `SendFile` in `httpd.c`.
 - **DVBCore DVB-NIP features:** ROUTE reception, compressed signalling files,
   48-bit TOIs, ROHC and GSE-Lite link-layer signalling.
 - **DVB-HB** (Annex F): re-packaging TS services as DASH. Optional.

@@ -61,7 +61,8 @@ char* ADMIN_StatusJson(void)
    BOOLEAN running, completed, locked;
    time_t finished, since;
    S32BIT source_index;
-   U32BIT bytes, files, max_bytes;
+   U32BIT bytes, files, max_bytes, threshold;
+   BOOLEAN disk_enabled, all_services;
    U32BIT wall_seconds;
    U16BIT wall_ms;
    double utc;
@@ -131,6 +132,13 @@ char* ADMIN_StatusJson(void)
    DVBNIP_GetStoreUsage(&bytes, &files, &max_bytes);
    Append(&j, "],\"fileStore\":{\"bytes\":%lu,\"files\":%lu,\"maxBytes\":%lu}",
       (unsigned long)bytes, (unsigned long)files, (unsigned long)max_bytes);
+
+   /* files received to disk (--store-dir): complete ones, and bytes including those being received */
+   disk_enabled = NIPPAPP_GetDiskStore(&threshold, &all_services);
+   DVBNIP_GetDiskStoreUsage(&bytes, &files, &max_bytes);
+   Append(&j, ",\"diskStore\":{\"enabled\":%s,\"bytes\":%lu,\"files\":%lu,\"maxBytes\":%lu,"
+      "\"threshold\":%lu,\"allServices\":%s}", disk_enabled ? "true" : "false", (unsigned long)bytes,
+      (unsigned long)files, (unsigned long)max_bytes, (unsigned long)threshold, all_services ? "true" : "false");
    Append(&j, ",\"channels\":%u", (unsigned)ADB_GetNumServicesInList(ADB_SERVICE_LIST_ALL, FALSE));
 
    Append(&j, ",\"networks\":[");

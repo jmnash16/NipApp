@@ -5,8 +5,8 @@
 # at the end.
 #
 #   tools/asan-check.sh            all scenarios
-#   tools/asan-check.sh scans      one scenario: scans, networks, change, carousels, nolist, retune
-#                                  or prebuffer
+#   tools/asan-check.sh scans      one scenario: scans, networks, change, carousels, nolist, retune,
+#                                  prebuffer or disk
 #
 # CAPTURES (default ../Streams/DvbNIP next to the NippApp directory) is where the captures are, PORT
 # (default 18080) the HTTP port used, and KEEP=1 keeps the working directories and logs.
@@ -395,6 +395,61 @@ scenario_prebuffer()
 }
 
 # ---------------------------------------------------------------------------------------------------
+# The disk store: SES with a 30 MB video in its carousel (tools/make-carousel-pcap.py), sent twice
+# per loop, the first time with gaps
+
+# a field of /api/status, by a Python expression on d
+status_field() { curl -s -m 10 "$base/api/status" | python3 -c "import json, sys; d = json.load(sys.stdin); print($1)"; }
+
+scenario_disk()
+{
+   local dir="$work/disk" conf="$work/disk.conf" log="$work/disk.log" pcap="$work/ses-carousel.pcap"
+   local store="$work/store" v="/ses.com/private/vod_small/HDplus_ExtraScreen.mp4" code
+   echo "Disk store (SES with a 30 MB video in its carousel)"
+   if ! python3 tools/make-carousel-pcap.py "$captures/2025-02-11_1min.pcap" "$pcap" \
+          --content-out "$work/video.bin" > /dev/null; then
+      fail "the test capture is made"
+      return
+   fi
+   echo "11141 H 23500 pcap $pcap loop" > "$conf"
+   start "$dir" "$conf" "$log" --scan --store-dir "$store" || { stop "$log"; return; }
+
+   for _ in $(seq 1 40); do
+      code=$(curl -s -o "$work/video.got" -m 60 -w '%{http_code}' "$base$v")
+      [ "$code" = 200 ] && break
+      sleep 5
+   done
+   check "the 30 MB video arrives whole (sent twice per loop, the first time with gaps)" \
+      "[ '$code' = 200 ] && cmp -s '$work/video.bin' '$work/video.got'"
+   check "it is kept on disk, not in memory" \
+      "[ \$(status_field \"d['diskStore']['files']\") -ge 1 ] && [ \$(status_field \"d['fileStore']['bytes']\") -lt 16000000 ]"
+   curl -s -o "$work/video.range" -m 30 -H 'Range: bytes=15000000-15999999' "$base$v"
+   check "a byte range of it (206, the right bytes)" \
+      "cmp -s '$work/video.range' <(dd if='$work/video.bin' bs=1M skip=15000000 count=1000000 iflag=skip_bytes,count_bytes 2>/dev/null)"
+   check "a range past its end is 416" \
+      "[ \$(curl -s -o /dev/null -m 10 -w '%{http_code}' -H 'Range: bytes=99999999-' '$base$v') = 416 ]"
+
+   # the carousel comes round again while the file is asked for
+   for _ in $(seq 1 14); do
+      curl -s -o /dev/null -I -m 10 "$base$v"
+      sleep 5
+   done
+   check "the carousel's next pass doesn't receive it again" "[ \$(ls '$store' | grep -c '^nip-') -eq 1 ]"
+   stop "$log"
+
+   log="$work/disk-limit.log"
+   start "$dir" "$conf" "$log" --store-dir "$store" --disk-limit 20M || { stop "$log"; return; }
+   check "the store is emptied at startup" "[ \$(ls '$store' | grep -c '^nip-') -eq 0 ]"
+   for _ in $(seq 1 14); do
+      code=$(curl -s -o /dev/null -m 30 -w '%{http_code}' "$base$v")
+      sleep 5
+   done
+   check "a file larger than the disk store isn't received ($code, nothing on disk)" \
+      "[ '$code' = 503 ] && [ \$(status_field \"d['diskStore']['bytes']\") -eq 0 ]"
+   stop "$log"
+}
+
+# ---------------------------------------------------------------------------------------------------
 
 if curl -s -o /dev/null -m 2 "$base/time"; then
    echo "Port $port is in use; set PORT" >&2
@@ -408,10 +463,10 @@ fi
 echo "Building NippApp with AddressSanitizer"
 make clean > /dev/null && make ASAN=1 > "$work/build.log" 2>&1 || { echo "build failed, see $work/build.log"; KEEP=1; exit 1; }
 
-scenarios="${1:-scans networks change carousels nolist retune prebuffer}"
+scenarios="${1:-scans networks change carousels nolist retune prebuffer disk}"
 for scenario in $scenarios; do
    case "$scenario" in
-      scans|networks|change|carousels|nolist|retune|prebuffer) "scenario_$scenario" ;;
+      scans|networks|change|carousels|nolist|retune|prebuffer|disk) "scenario_$scenario" ;;
       *) echo "unknown scenario $scenario" >&2; failures=$((failures + 1)) ;;
    esac
 done

@@ -1,5 +1,10 @@
 # NippApp design outline
 
+How to build, run and use NippApp is in [docs/USER_MANUAL.md](docs/USER_MANUAL.md);
+its architecture and its interfaces with DVBCore are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). This file records the design
+decisions and the findings behind them, as development went.
+
 NippApp is a headless DVB-NIP gateway built on DVBCore. It searches DVB-NIP
 carriers (MPE and GSE), stores what it finds in DVBCore's channel database,
 acts as a local DVB-I service list registry for the broadcast lists, tunes the

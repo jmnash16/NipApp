@@ -331,7 +331,7 @@ for s in json.load(sys.stdin)["streams"]:
 scenario_prebuffer()
 {
    local dir="$work/prebuffer" conf="$work/prebuffer.conf" log="$work/prebuffer.log" b="/ses.com/livesim2"
-   local watcher now n took released stopped
+   local watcher now n took released stopped receiving_s
    echo "Pre-buffering (SES)"
    source_line 11141 H 23500 pcap 2025-02-11_1min.pcap > "$conf"
    check "--prebuffer refuses a value that isn't all, off or a number" \
@@ -350,6 +350,9 @@ scenario_prebuffer()
    check "/api/status gives the setting" \
       "curl -s -m 10 '$base/api/status' | grep -q '\"prebuffer\":{\"enabled\":true,\"maxPerCarrier\":null}'"
 
+   receiving_s=$(curl -s -D - -o /dev/null -m 20 "$base$b/B2/Manifest.mpd" | tr -d '\r' | sed -n 's/^X-NippApp-Receiving: //p')
+   check "B2's manifest says how long it has been received (${receiving_s:-none} s), for the player" \
+      "[ '${receiving_s:-0}' -ge 10 ]"
    took=$(curl -s -o /dev/null -m 20 -w '%{http_code} %{time_total}' "$base$b/B2/Manifest.mpd")
    check "a change to B2: its manifest at once ($took s)" "[ '${took% *}' = 200 ] && awk 'BEGIN { exit !(${took#* } < 0.5) }'"
    now=$(date -u -d "$(curl -s -m 5 "$base/time")" +%s 2>/dev/null || echo 0)

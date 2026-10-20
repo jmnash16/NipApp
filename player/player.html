@@ -353,6 +353,7 @@ async function play(service, instance) {
    * segments that start after joining are received, so the player starts once enough of them have. */
   log('Requesting ' + url);
   let manifest;
+  let receiving = NaN;
   try {
     let response = await fetch(url, { cache: 'no-store' });
     /* 503: every tuner is in use; the gateway frees one when the services using it stop */
@@ -366,15 +367,23 @@ async function play(service, instance) {
     }
     if (!response.ok) throw new Error('HTTP ' + response.status);
     manifest = await response.text();
+    receiving = parseFloat(response.headers.get('X-NippApp-Receiving'));
   } catch (error) {
     log('The manifest is not available: ' + error.message, 'err');
     if (instance.label === 'DVB-HB') log('DVB-HB services need a gateway with a DVB-HB function, which this gateway does not have', 'err');
     return;
   }
-  const wait = LIVE_DELAY + segmentDuration(manifest, isHls) + JOIN_MARGIN;
-  log('Joined; waiting ' + wait.toFixed(1) + ' s for the first segments');
-  await new Promise((resolve) => setTimeout(resolve, wait * 1000));
-  if (token !== playToken) return;
+  /* The gateway says how long it has been receiving the service: one pre-buffered for a channel
+   * change already has the segments to start from, so there is less or nothing to wait for */
+  const needed = LIVE_DELAY + segmentDuration(manifest, isHls) + JOIN_MARGIN;
+  const wait = Number.isFinite(receiving) ? Math.max(0, needed - receiving) : needed;
+  if (wait > 0) {
+    log('Joined; waiting ' + wait.toFixed(1) + ' s for the first segments');
+    await new Promise((resolve) => setTimeout(resolve, wait * 1000));
+    if (token !== playToken) return;
+  } else {
+    log('Received for ' + receiving + ' s already: starting at once');
+  }
 
   if (isHls) startHls(url); else startDash(url);
 }

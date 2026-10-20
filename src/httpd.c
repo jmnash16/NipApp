@@ -678,6 +678,19 @@ static U32BIT FixAACConfig(U8BIT *data, U32BIT len)
 /* prefer_registry: serve the registry's copy before the NIP library's. For the entry points,
  * which the registry keeps whatever location they came with, the NIP library may hold an older
  * network's under the URN. */
+/* A DASH manifest or HLS playlist, by its type or else its name */
+static BOOLEAN IsManifestOrPlaylist(const char *path, const char *filetype)
+{
+   const char *ext = strrchr(path, '.');
+
+   if ((filetype != NULL) && ((strncmp(filetype, application_dash_xml, strlen(application_dash_xml)) == 0) ||
+       (strcasestr(filetype, "mpegurl") != NULL)))
+   {
+      return TRUE;
+   }
+   return ((ext != NULL) && ((strcasecmp(ext, ".mpd") == 0) || (strcasecmp(ext, ".m3u8") == 0))) ? TRUE : FALSE;
+}
+
 static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefer_registry, const char *query)
 {
    U8BIT *data;
@@ -689,6 +702,9 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
    U32BIT waited;
    char *body;
    char encoding_header[64];
+   char receiving_header[96];
+   char headers[192];
+   U32BIT receiving_s;
    BOOLEAN from_registry;
    BOOLEAN data_malloced;
    int filter;
@@ -739,6 +755,16 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
     * doesn't decode is passed on as it is, saying how it is encoded */
    data_malloced = from_registry;
    encoding_header[0] = '\0';
+
+   /* With a manifest or playlist, how long its service has been received (a pre-buffered one may
+    * have been for a while), so a player knows whether the segments it starts from are here yet */
+   receiving_header[0] = '\0';
+   if (!from_registry && IsManifestOrPlaylist(path, (const char *)filetype) &&
+       DVBNIP_GetServiceReceivingTime((const U8BIT *)path, &receiving_s))
+   {
+      snprintf(receiving_header, sizeof(receiving_header),
+         "X-NippApp-Receiving: %u\r\nAccess-Control-Expose-Headers: X-NippApp-Receiving\r\n", (unsigned)receiving_s);
+   }
    if (encoding != NULL)
    {
       if (ENC_Decode((const char *)encoding, data, len, &decoded, &decoded_len))
@@ -762,8 +788,8 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
       {
          memcpy(body, data, len + 1);
          RewriteMPD(conn, body);
-         SendResponse(conn, 200, "OK", (const char *)filetype, "Cache-Control: no-store\r\n",
-            body, strlen(body));
+         snprintf(headers, sizeof(headers), "Cache-Control: no-store\r\n%s", receiving_header);
+         SendResponse(conn, 200, "OK", (const char *)filetype, headers, body, strlen(body));
          free(body);
       }
    }
@@ -813,8 +839,9 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
       {
          len = FixAACConfig(data, len);
       }
+      snprintf(headers, sizeof(headers), "%s%s", encoding_header, receiving_header);
       SendResponse(conn, 200, "OK", (filetype == NULL) ? "application/octet-stream" : (const char *)filetype,
-         encoding_header, data, len);
+         headers, data, len);
    }
 
    if (data_malloced)

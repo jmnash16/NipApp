@@ -328,6 +328,16 @@ and that segment came in under 0.01 s. Memory on SES: the pre-buffered B2
 held 10-23 MB, B1 (watched) up to 43 MB. `tools/asan-check.sh prebuffer`
 checks this, `--prebuffer 1` and the release.
 
+The player waited a fixed time before starting dash.js or hls.js (live delay
++ a segment + 1 s, 6-7 s), as without pre-buffering the segments only start
+arriving at the join. That wait was all of the 6-7 s still seen after
+pre-buffering. So a manifest or playlist now comes with
+`X-NippApp-Receiving: <seconds>`, how long its service has been received
+(`DVBNIP_GetServiceReceivingTime`), exposed for CORS. The player waits only
+for the part of that time not already past, which is none for a pre-buffered
+channel. Other DVB-I clients ignore the header; they get the segments at
+once too.
+
 Served MPDs list only segments actually available (9.1.2):
 `minimumUpdatePeriod` 2 s, the first MPD held until the client's live point
 lies after the join, and the AAC config fix from the test tool.

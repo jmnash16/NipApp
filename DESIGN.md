@@ -878,6 +878,92 @@ IPv4-mapped addresses), and the library is started and stopped with
 `mg_init_library` and `mg_exit_library`. Every request is still answered by
 NippApp's own handler.
 
+## STB Implementation
+
+Reviewed 2026-10-20: can NippApp run on a set-top box, given front-end
+drivers? Nothing in the design prevents it. All the hardware is behind
+DVBCore's platform API, the same interface DVBCore uses on STBs; the file
+tuner and demux are NippApp's implementations of it. With the STB's tuner and
+demux functions in their place, the DVB-NIP library and NippApp's application
+modules are unchanged. To be revisited after disk caching. What has to be
+done or decided, most significant first:
+
+1. **Sharing tuners with the STB's own TV software.** The one real design
+   question. If the box also runs a TV application (e.g. DVBCore's App with a
+   UI), two DVBCore instances in two processes would each think they own the
+   tuners and demux. Either build the gateway into the STB's DVBCore
+   application as one process (DVBCore's resource manager arbitrates; NIP
+   streams already ask for tuners at `DP_PRIORITY_LOW`, so live TV wins;
+   NippApp's modules become a library in that application rather than a
+   separate `main()`), or reserve tuners for NippApp. A headless gateway box
+   doesn't have this question.
+2. **Platform layer for the real hardware.**
+   - Replace `stbhwtun.c` and `stbhwdmx.c` with the SoC vendor's tuner and
+     demux functions, or the Linux DVB API. The tuner must report lock with
+     `STB_OSSendEvent(HW_EV_CLASS_TUNER, ...)` as the file tuner does; the
+     no-signal and no-tuner handling depend on those events.
+   - GSE carriers: `GSE_DataIn` expects GSE packets, so the demodulator must
+     deliver the carrier as a generic stream (not TS) and the driver or
+     platform layer must strip the base-band frame headers. Many STB
+     demodulators and drivers only output TS: check the target hardware.
+     MPE carriers need nothing extra (ordinary section filtering).
+   - Throughput: MPE at 50-60 Mbit/s through section filters is heavy for
+     some hardware demuxes; check the SoC's section filter buffers keep up.
+   - Take the other files that touch hardware or the OS (OS layer, disk,
+     network) from the STB's existing DVBCore port; NippApp's are mostly
+     copies of DVBCore's Linux reference ones.
+3. **What the file tuner stands in for.**
+   - Dish setup: `search.c` creates a satellite record "NippApp" with a
+     universal LNB. A real installation needs the LNB type, DiSEqC or
+     Unicable, and the satellite position. There is no setup UI, so this needs
+     a configuration file or options.
+   - The bootstrap carriers to search (Annex C.4.1): the sources file does
+     this now; the same format without the file columns would serve as the
+     preset list.
+4. **Resources.**
+   - RAM: the file store uses DVBCore's default limits (256 MB in all,
+     128 MB per service) and NippApp has no option to change them.
+     `DVBNIP_SetFileStoreLimits` exists, so an option is a small addition;
+     needed on a box with 1-2 GB. Pre-buffering stays within the limits, but
+     on a small box `--prebuffer` should probably default to a few channels.
+   - CPU: FLUTE reassembly of a whole carrier is in software, and each HTTP
+     response copies the file out of the store. Only measured on a desktop;
+     profile on the STB's processor.
+   - Flash wear: the registry writes only on change and the database only at
+     a scan or shutdown, so these are fine. For disk caching: live segments
+     stay in RAM, and the disk store should be on a USB disk or HDD rather
+     than eMMC.
+5. **Build and system integration.**
+   - Cross-compiling: the Makefile assumes the native compiler and
+     `/usr/include/libxml2`; it needs a cross-compiler, a sysroot and
+     pkg-config settings from the STB SDK (Buildroot or Yocto provide libxml2,
+     SQLite, zlib, libjpeg and libpng).
+   - 32-bit ARM: DVBCore is built for 64-bit at present. No casts of pointers
+     to 32-bit types were found in the NIP library or NippApp, but it hasn't
+     been built or run as 32-bit; running `tools/asan-check.sh` on a 32-bit
+     build would answer that.
+   - mDNS: Avahi is optional. Without Avahi on the box, build with `MDNS=0`
+     or support the box's mDNS stack (e.g. mDNSResponder).
+   - Running as a service: an init or systemd script, logging to syslog
+     rather than stdout, a writable working directory.
+   - Security: plain HTTP, no authentication, on all interfaces. Fine on a
+     home LAN; on a box with a WAN interface it should bind to the LAN
+     interface only, for which there is no option yet.
+6. **Not yet supported in DVBCore, and possibly needed live:** ROUTE,
+   compressed signalling files, 48-bit TOIs, ROHC and GSE-Lite link-layer
+   signalling. The recordings don't need them, but a live GSE carrier may use
+   GSE-Lite or ROHC. MPE carriers are exempt (Annex A), so an MPE carrier is
+   the safest first live test.
+
+Suggested route:
+
+1. A TS-output STB tuning an MPE carrier, with NippApp as the box's only DVB
+   application.
+2. The small configuration options: LNB and satellite, file store limits,
+   the address to bind to, the bootstrap carriers.
+3. Then GSE output from the demodulator, tuner sharing with a TV
+   application, and 32-bit builds, as the target needs.
+
 ## Resume here (state at 2026-10-20)
 
 Committed: milestones 1-5 (but the same-clock test) and Phase B, including
@@ -913,7 +999,7 @@ changes.
 
 Milestone 5 still needs captures of two carriers with the same clock.
 
-Next: disk caching of large files (agreed design: carousel files over a size
+Next: disk caching of large files, then revisit "STB Implementation" above (agreed design: carousel files over a size
 threshold received to a partial file on disk and served from it with byte
 ranges; live segments stay in RAM unless asked; `--store-dir`,
 `--disk-threshold`, `--disk-limit`; a FLUTE PCAP generator to test it, as no

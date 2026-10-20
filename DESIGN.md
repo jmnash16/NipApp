@@ -338,6 +338,14 @@ for the part of that time not already past, which is none for a pre-buffered
 channel. Other DVB-I clients ignore the header; they get the segments at
 once too.
 
+A channel signalled in DASH and HLS from one directory (SES's
+`livesim2/B1/Manifest.mpd` and `playlist.m3u8`) has two services with the
+same directory. A request for a file that is neither's manifest (a segment,
+an HLS media playlist) went to the first in SIF order, so a DASH player's
+segments also started the HLS service (fixed 2026-10-20). `FindServiceForPath`
+now prefers the service being received on such a tie: one a client receives
+or has started, then a pre-buffered one being received, then one starting.
+
 Served MPDs list only segments actually available (9.1.2):
 `minimumUpdatePeriod` 2 s, the first MPD held until the client's live point
 lies after the join, and the AAC config fix from the test tool.

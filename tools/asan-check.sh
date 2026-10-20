@@ -338,8 +338,12 @@ scenario_prebuffer()
       "! ./build/nippapp -d '$dir' -s '$conf' --prebuffer some > /dev/null 2>&1"
    start "$dir" "$conf" "$log" --scan || { stop "$log"; return; }
 
-   # a player on B1: the manifest every second
-   ( while true; do curl -s -o /dev/null -m 5 "$base$b/B1/Manifest.mpd"; sleep 1; done ) &
+   # a player on B1: the manifest and an init segment every second
+   ( while true; do
+        curl -s -o /dev/null -m 5 "$base$b/B1/Manifest.mpd"
+        curl -s -o /dev/null -m 5 "$base$b/B1/HD/init.mp4"
+        sleep 1
+     done ) &
    watcher=$!
    sleep 15
    receiving > "$work/prebuffer.receiving"
@@ -347,6 +351,8 @@ scenario_prebuffer()
    check "B2 and C1 are pre-buffered, as DASH" \
       "grep -qx '$b/B2/Manifest.mpd:pre' '$work/prebuffer.receiving' && grep -qx '$b/C1/Manifest.mpd:pre' '$work/prebuffer.receiving'"
    check "no HLS service is pre-buffered" "! grep -q 'm3u8:pre' '$work/prebuffer.receiving'"
+   check "B1's segments don't start B1's HLS service (one directory for both)" \
+      "! grep -q '$b/B1/playlist.m3u8' '$work/prebuffer.receiving'"
    check "/api/status gives the setting" \
       "curl -s -m 10 '$base/api/status' | grep -q '\"prebuffer\":{\"enabled\":true,\"maxPerCarrier\":null}'"
 

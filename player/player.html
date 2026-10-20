@@ -356,7 +356,8 @@ async function play(service, instance) {
   let receiving = NaN;
   try {
     let response = await fetch(url, { cache: 'no-store' });
-    /* 503: every tuner is in use; the gateway frees one when the services using it stop */
+    /* 503: every tuner is in use (the gateway frees one when the services using it stop), or the
+     * carrier can't be received; the body says which */
     while (response.status === 503) {
       const retry = parseInt(response.headers.get('Retry-After'), 10) || 10;
       const reason = (await response.text()).trim() || 'the service is not available yet';

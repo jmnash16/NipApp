@@ -233,9 +233,10 @@ static void AddStream(void *user_data, const S_DVBNIP_STREAM *stream)
       Append(j, "]}");
    }
    Append(j, "%s{\"network\":%u,\"carrier\":%u,\"service\":%u,\"tuned\":%s,\"noTuner\":%s,"
-      "\"entries\":%u,\"prebuffered\":%u,\"receiving\":[", j->first ? "" : ",", (unsigned)stream->nid,
-      (unsigned)stream->tid, (unsigned)stream->svcid, stream->tuned ? "true" : "false",
-      stream->no_tuner ? "true" : "false", (unsigned)stream->services, (unsigned)stream->prebuffered);
+      "\"noSignal\":%s,\"entries\":%u,\"prebuffered\":%u,\"receiving\":[", j->first ? "" : ",",
+      (unsigned)stream->nid, (unsigned)stream->tid, (unsigned)stream->svcid, stream->tuned ? "true" : "false",
+      stream->no_tuner ? "true" : "false", stream->no_signal ? "true" : "false", (unsigned)stream->services,
+      (unsigned)stream->prebuffered);
    j->first = FALSE;
    j->in_stream = TRUE;
 }

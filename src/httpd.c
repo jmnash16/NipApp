@@ -17,7 +17,8 @@
  *
  *          - Requests under a service's directory start the service, which tunes its carrier on
  *            demand; it stops when its files are no longer requested (the NIP library's logic).
- *          - A file not received yet is waited for, then 404 (clause 8.5.3).
+ *          - A file not received yet is waited for, then 404 (clause 8.5.3). When no tuner is
+ *            free, or the carrier can't be received, it is 503 with Retry-After at once.
  *          - DVB-I service lists and entry points have http://dvb.gw/ replaced by this server's
  *            address (Annex F.2.1). When the NIP library doesn't have one (its carrier isn't
  *            tuned), the copy kept by the registry is served.
@@ -77,6 +78,8 @@
 #define NO_TUNER_RETRY_S      10
 /* Retry-After for a carousel's file that hasn't come round yet */
 #define CAROUSEL_RETRY_S      10
+/* Retry-After when the carrier can't be received (no lock): each new request tunes it again */
+#define NO_SIGNAL_RETRY_S     30
 
 /* The broadcast gives the DVB-I service list entry points a URN, not a URL (clause 8.2.5.1), so
  * the gateway chooses where to serve them (clause 8.1.7.3) */
@@ -745,6 +748,14 @@ static void SendFile(struct mg_connection *conn, const char *path, BOOLEAN prefe
       {
          printf("NippApp: no tuner free for %s\n", path);
          SendNoTuner(conn);
+         return;
+      }
+      /* the carrier didn't lock (no signal, or no capture for it): 503, as for no tuner (8.5.3),
+       * rather than waiting for a file that can't come */
+      if (DVBNIP_IsCarrierUnreceivable((const U8BIT *)path))
+      {
+         printf("NippApp: the carrier for %s can't be received\n", path);
+         SendUnavailable(conn, NO_SIGNAL_RETRY_S, "the carrier can't be received (no signal)\n");
          return;
       }
       usleep(HOLD_STEP_MS * 1000);

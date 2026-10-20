@@ -283,6 +283,16 @@ As 8.5.3 sets out:
    files can be on other carriers (8.1.7.5, 9.5.4).
 3. Serve from the file store. A file not yet received: wait a set time, then 404.
    No tuner free: 503 with Retry-After.
+   Carrier can't be received: 503 with Retry-After 30 and "the carrier can't be
+   received (no signal)", at once (2026-10-20). DVBCore's control code passes
+   STB_EVENT_TUNE_LOCKED and NOTLOCKED to the NIP library
+   (`DVBNIP_TunerLockEvent`). A stream tuned for its services whose tuner
+   reports not locked before it has locked is released and marked
+   (`DVBNIP_IsCarrierUnreceivable`, `noSignal` in `/api/status`). It isn't
+   tuned again for 10 s, so the requests meanwhile don't each tune it. One that
+   loses lock after locking is kept, as a real tuner may lock again. With the
+   recordings this is SES's Inverto 1-3, on SES carrier 1102 (12441 V
+   27500), which no capture has; before, they were 404 after 8 s.
 
 A service is started through the existing `nip_mgr` logic (`TuneToNipService`),
 stops after 20 s without requests, and its tuner is released 10 s later. The

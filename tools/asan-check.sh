@@ -338,6 +338,12 @@ scenario_prebuffer()
       "! ./build/nippapp -d '$dir' -s '$conf' --prebuffer some > /dev/null 2>&1"
    start "$dir" "$conf" "$log" --scan || { stop "$log"; return; }
 
+   # SES's Inverto services are on its other carrier (12441 V), which no capture has
+   took=$(curl -s -o /dev/null -m 20 -w '%{http_code} %{time_total}' "$base/inverto.tv/s0/5G-EMERGE/Live/hls/crits_linear/crits_linear.m3u8")
+   check "a carrier that can't be received: 503 at once ($took s)" \
+      "[ '${took% *}' = 503 ] && awk 'BEGIN { exit !(${took#* } < 2) }'"
+   check "/api/status says it has no signal" "curl -s -m 10 '$base/api/status' | grep -q '\"carrier\":1102,[^}]*\"noSignal\":true'"
+
    # a player on B1: the manifest and an init segment every second
    ( while true; do
         curl -s -o /dev/null -m 5 "$base$b/B1/Manifest.mpd"

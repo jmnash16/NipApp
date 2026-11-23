@@ -1,0 +1,58 @@
+DTVKit Software Licence
+
+1. You may copy and distribute exact copies of DTVKit Software in Source Code form to any third party who is at the time of transfer a member of DTVKit provided that you also are a member of DTVKit; you keep intact all notices, copyright messages and disclaimer of warranty and you include a copy of this licence with the DTVKit Software.
+
+2. You may modify your copy or copies of the DTVKit Software or any portion of it, thus forming a work based on the DTVKit Software (which hereafter is included in the term DTVKit Software) and distribute as Source Code such modifications or work under the terms set forth in Section 1 above, provided that you keep intact all notices, copyright messages and disclaimer of warranty; you include a copy of this licence in the distribution and that you add a prominent notice stating that you changed the files, the nature of change and the date of the change.
+You agree that  the modified work is licensed at no charge. However if identifiable sections of that work are not derived from DTVKit and can reasonably considered independent and separate works you are free to set whatever terms you see fit for those separate works.
+
+3. You may distribute a Binary version (including any header files or scripts which are required only for the purposes of linking this binary version to other software)  to a third party organisation so long as you keep intact all notices, copyright messages and disclaimer of warranty in any human readable files and you include a copy of this licence agreement in the distribution.
+
+4. You may copy a Binary version for use in an end product.
+
+5. If you receive the DTVKit Software in any form and you are not a DTVKit Member you must either immediately join DTVKit or destroy the DTVKit Software you have received.
+
+6. You may target/compile the DTVKit Software to run a Linux based PC only for the purposes of running or extending the DTVKit Test Suite. You may not distribute this PC version for any reason and you may not use it for any other purpose than running the DTVKit Test Suite.
+
+7. You may not copy, modify, sublicense, link with or distribute the DTVKit Software except as expressly provided under this Licence Agreement. Any such attempt to copy, modify, sublicense, link with or distribute the DTVKit Software is void and will automatically terminate your rights under this Licence. However parties who have received copies or rights from you under this licence will not have their licences terminate so long as such parties remain in full compliance.
+
+8. You are not required to accept this licence agreement, since you have not signed it. However nothing else grants you permission to modify, compile, link to, copy or distribute the DTVKit Software. These actions are prohibited by law if you do not accept this licence. Therefore by modifying, compiling, linking to, copying, or distributing the DTVKit Software, you indicate your acceptance of this Licence to do so, and all its terms and conditions.
+
+9. Each time you redistribute the DTVKit Software, the recipient automatically receives a licence from DTVKit subject to these terms and conditions. You may not impose any further restrictions on the recipients exercise of the rights granted herein. You are not responsible for enforcing compliance by third parties with this Licence.
+
+10. If any portion of this licence is held invalid or unenforceable under any particular circumstance, the balance will apply, and the whole is intended to apply in other circumstances.
+
+11. Because the DTVKit Software is licensed free of charge there is no warranty for the DTVKit Software, to the extent permitted by applicable law. Except when otherwise stated in writing the copyright holders and/or other parties provide the DTVKit Software "as is" without warranty of any kind, either expressed or implied, including, but not limited to implied warranties of merchantability and fitness for a particular purpose. The entire risk as to the quality and performance of the DTVKit Software is with you. Should the DTVKit Software prove defective you assume the cost of all necessary servicing repair or correction.
+
+12. In no event unless required by applicable law or agreed to in writing will any copyright holder or any other party who may modify, copy or distribute the DTVKit Software as permitted above be liable to you for damages, including any general, special, incidental or consequential damages arising out of the use or inability to use the DTVKit Software (including but not limited to loss of data or data being rendered inaccurate or losses sustained by you or third parties or a failure of the DTVKit Software to operate with any other software), even if such holder or other party has been advised of the possibility of such damages.
+
+
+Definitions
+
+In these Membership Rules, unless the context demands otherwise, the terms defined below will have the corresponding meaning.
+
+Contractor           Means an individual contracted to work on for a Member for a finite period as an alternative to the Member using internal resources.
+
+DTVKit Software      Means either the DTVKit software or any derivative work under copyright law; that is a work containing DTVKit Software or part of it, either Verbatim or with modifications and/or translated into another programming language
+
+Management Office    The permanent administrative staff of DTVKit.
+
+Member               Means a member of DTVKit of any Membership Class excluding Partners.
+
+Licence              The legally binding agreement between DTVKit and our members It defines how the software can be used and distributed, and what responsibilities and restrictions apply to each party.
+
+Operator             An organisation that sources and aggregates TV content, through the creation of broadcast and IP specifications; and the adoption of standards for manufacturers to build and test interoperable products against.
+
+Participant          An individual who is representing a DTVKit Member.
+
+Platform             A semiconductor device containing a processor capable of executing DTVKit Software or its derivatives.
+
+Source Code          Means the preferred form of the DTVKit Software for making modifications to it including the complete source code for all modules in whatever programming language they are supplied, plus any associated interface definition files, data tables, scripts and documentation.
+
+Binary               Fully compiled source code, shipped as either a software library, or part of an executable application.
+
+Sub-Contractor       Means a company contracted to work on for a Member for a finite period as an alternative to the Member using internal resources.
+
+DTVKit Test Suite    An application designed to test the integration of the porting of DTVKit to the linux porting layer.
+
+Partners Member      A Partner Member is a company that wishes to be part of the DTVKit Eco-System, but does not require (or need) access to the source code.
+

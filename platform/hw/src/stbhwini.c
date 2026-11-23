@@ -15,6 +15,10 @@
  * and you are expected to delete this and any associated files immediately.
  * Further information on DTVKit, membership and terms can be found at www.dtvkit.org
  *******************************************************************************/
+/* CHANGED FILE (DTVKit licence, section 2)
+ * Copied from App and changed for NippApp on 8 October 2026: signal trapping and the
+ * clean-up it did are removed, as main() handles signals.
+ */
 /**
  * @brief   Set Top Box - STB810 Hardware Layer, Top level initialisation
  * @file    stbhwini.c

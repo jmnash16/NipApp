@@ -143,7 +143,11 @@ This writes `build/nippapp-<version>-linux-x86_64.tar.gz`, which contains:
 | `lib/` | the libraries whose versions differ between distributions: libxml2, ICU, SQLite, libjpeg, libpng |
 | `player/` | the web player, with its libraries |
 | `sources.conf` | the build machine's sources file, to edit |
+| `licence.txt`, `licences/` | DTVKit's licence, and those of the third-party code included |
 | `README.txt` | what the target needs, and how to run it |
+
+The package is a Linux PC build of DTVKit Software, which section 6 of
+`licence.txt` restricts. Get DTVKit's agreement before passing it on.
 
 On the target:
 
@@ -299,36 +303,124 @@ NippApp: stopped
 
 ### 4.5 The disk store
 
-By default every received file is kept in memory. Large files from object
-carousels, such as SES's offline videos and PDFs (17-291 MB), don't fit, so
-they need a disk store:
+By default every received file is kept in memory, within 256 MB in all and
+128 MB per service. That suits live services, whose segments are kept for
+only 30 s. It doesn't suit the large files some broadcasts send in object
+carousels, such as SES's offline videos and PDFs (17-291 MB): they don't fit,
+and while one was being received it would push live segments out of memory.
 
-```
-./build/nippapp -d ~/nippapp-data --store-dir /data/nippapp-store
-```
+A *disk store* solves this. Large files are received straight to a directory
+on disk and served from there, and a video served from the store can be
+seeked in the player, as the gateway answers byte-range requests.
+
+The disk store is off unless `--store-dir` is given.
+
+#### 4.5.1 Options
+
+| Option | Meaning | Default |
+|---|---|---|
+| `-D`, `--store-dir <dir>` | Turns the disk store on, in this directory. It is created if it doesn't exist. A relative path is relative to where NippApp is started, not to `-d`. | off: every file in memory |
+| `-T`, `--disk-threshold <size>` | Files this large or larger go to disk; smaller ones stay in memory | `4M` |
+| `-L`, `--disk-limit <size>` | The most the store holds, complete files and files still arriving together. At most `4095M`. | `2G` |
+| `-a`, `--disk-all` | Every service's files of the threshold or more go to disk, live segments included, not only object carousels' files | off |
+
+Sizes are a number of bytes, or a number followed by `K`, `M` or `G`
+(1024, 1024², 1024³): `512K`, `4M`, `2G`. `--disk-threshold`,
+`--disk-limit` and `--disk-all` only take effect with `--store-dir`.
+
+When the store is on, NippApp says so as it starts:
 
 ```
 NippApp: disk store in /data/nippapp-store: carousels' files of 4096 KB or more, up to 2048 MB
 ```
 
-- Carousel files of 4 MB or more (`--disk-threshold`) are received to disk
-  and served from there. Smaller files and live segments stay in memory.
-- A file that misses packets in one pass of its carousel is completed by
-  later passes, as long as it is still being asked for (the player asks
-  every 5 s while it waits). Once complete, it isn't received again when the
-  carousel comes round, unless it changes.
-- When the store reaches `--disk-limit` (default 2 GB), the oldest complete
-  files are dropped. A file larger than the limit isn't received.
-- Files aren't kept across restarts: NippApp empties the directory of its
-  own files (`nip-1`, `nip-2`, ...) when it starts. Other files in the
-  directory are left alone.
-- `--disk-all` sends every service's files of the threshold or more to disk,
-  live segments included. With `--disk-all --disk-threshold 0`, everything
-  except the signalling goes to disk. This is for a box with little memory;
-  on flash storage, it means many writes.
+#### 4.5.2 What goes where
 
-`/api/status` shows the store's use under `diskStore`
-([section 8.1](#81-get-apistatus)).
+| File | Without `--disk-all` | With `--disk-all` |
+|---|---|---|
+| Object carousel file of the threshold or more (offline videos, PDFs, large pictures) | disk | disk |
+| Object carousel file below the threshold | memory | memory |
+| Live segments, manifests, playlists | memory | disk if of the threshold or more |
+| Signalling (NIF, SIF, gateway configurations, service lists, entry points) | memory | memory |
+
+#### 4.5.3 Examples
+
+Offline content on a PC, with the default 4 MB threshold and 2 GB limit:
+
+```
+./build/nippapp -d ~/nippapp-data --store-dir ~/nippapp-store
+```
+
+A larger store on a second disk:
+
+```
+./build/nippapp -d ~/nippapp-data --store-dir /mnt/data/nippapp-store --disk-limit 4000M
+```
+
+A box with little memory: every service's files to disk, everything but the
+signalling, within 1 GB:
+
+```
+./build/nippapp -d /var/lib/nippapp --store-dir /mnt/usb/nippapp-store --disk-all --disk-threshold 0 --disk-limit 1G
+```
+
+#### 4.5.4 How it behaves
+
+- **Receiving.** A file going to disk is written as its packets arrive. A
+  small index of where each packet is stays in memory while the file is kept
+  (about 1.5% of the file's size).
+- **Carousel passes.** A carousel sends its files again and again. If a file
+  misses packets in one pass, later passes fill the gaps, as long as the file
+  is still being asked for: the web player asks every 5 s while it waits. An
+  incomplete file is kept for 10 minutes without packets. If nothing asks
+  for the file for 20-40 s, its carousel stops being received and the
+  incomplete file is deleted.
+- **Repeats.** Once a file is complete on disk, it isn't received again when
+  the carousel comes round, unless its length or its MD5 in the broadcast's
+  file description changes. Then the new version is received and replaces it.
+- **The limit.** When the store holds more than `--disk-limit`, the oldest
+  complete files are deleted. A file larger than the limit isn't received at
+  all; clients asking for it keep getting `503 waiting for the broadcast
+  carousel`.
+- **Live segments** with `--disk-all` are deleted after 30 s, as in memory.
+- **Serving.** A file in the store is sent as it is read from disk, with
+  `Accept-Ranges: bytes`. A request for one byte range gets just that range
+  (206), as a video player asks when seeking.
+- **Restarts.** The store isn't kept across restarts. When NippApp starts,
+  it deletes its own files from the directory (`nip-1`, `nip-2`, ...). Any
+  other files there are left alone.
+- **Sizes.** A file, and the store, must be under 4 GB.
+
+#### 4.5.5 Checking it
+
+`/api/status` ([section 8.1](#81-get-apistatus)) shows the store under
+`diskStore`, and the memory used under `fileStore`:
+
+```
+curl -s http://localhost:8080/api/status | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["diskStore"], d["fileStore"])'
+```
+
+```
+{'enabled': True, 'bytes': 31457280, 'files': 1, 'maxBytes': 2147483648, 'threshold': 4194304, 'allServices': False} {'bytes': 110742, 'files': 12, 'maxBytes': 268435456}
+```
+
+`bytes` counts complete files and files still arriving; `files` counts
+complete files only. The store's directory has one `nip-<n>` file for each
+file kept or arriving. NippApp also makes `disks/nip/store` in its working
+directory, a link to the store's directory.
+
+#### 4.5.6 Choosing a location
+
+- Put the store on a disk with room for `--disk-limit`, and not on a RAM
+  disk (`/tmp` on some systems is one), which would use memory after all.
+- On a box with flash storage (eMMC), `--disk-all` writes every live
+  segment: several gigabytes an hour per channel. Use a USB disk or hard
+  disk for it, or leave live segments in memory.
+- Use a directory of its own. NippApp only deletes its own `nip-*` files,
+  but the limit doesn't count anything else in the directory.
+- To test the store with the recordings, which have no large file complete,
+  make a test capture with `tools/make-carousel-pcap.py` ([section
+  12](#12-testing)).
 
 ## 5. The web player
 
@@ -695,6 +787,10 @@ in the sources file.
 | The player stops at "Stream initialised" | two carriers from recordings with different clocks are tuned | use one capture at a time, or captures with the same clock |
 | A playing channel jumps back about a minute | a looping capture restarted | expected with `loop` |
 | A picture never arrives | it is only partly in the capture | expected with short captures |
+| `the disk store in ... can't be used` | the store directory can't be created or written | check the path and its permissions |
+| `disks/nip/store is in the way of the store directory` | the working directory has a non-empty `disks/nip/store` directory, not a link | remove it; NippApp makes the link |
+| A large carousel file stays at `waiting for the broadcast carousel` | no disk store, a file larger than `--disk-limit`, or it is only partly in the capture | use `--store-dir`, raise `--disk-limit`; with the recordings, use `tools/make-carousel-pcap.py` |
+| Memory still fills up with large files | the disk store is off, or the files are smaller than `--disk-threshold` | check `diskStore` in `/api/status`; lower the threshold |
 | `mDNS: waiting for avahi-daemon` | avahi-daemon isn't running | `sudo systemctl enable --now avahi-daemon`, or `--no-mdns` |
 | `403` from `/api/status` | asked from another machine | run NippApp with `--admin-from-any` |
 | `cannot start the HTTP server on port 8080; is it in use?` | another program, or another NippApp, has the port | use `-p` |

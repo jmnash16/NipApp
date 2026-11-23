@@ -1054,13 +1054,13 @@ The DVB-I specification is in `DVBCore/documents/ts_103770v010201p.pdf`;
 To try Inverto + Eutelsat, a sources file with absolute paths, Inverto first:
 
 ```
-11471 V 27500 ts /home/jason/DTVkit/Streams/DvbNIP/1097000.ts loop
-11013 H 27500 ts /home/jason/DTVkit/Streams/DvbNIP/1087000.ts loop
+11471 V 27500 ts <captures>/1097000.ts loop
+11013 H 27500 ts <captures>/1087000.ts loop
 ```
 
 then `./build/nippapp -d <dir> -s <file> --scan` and open
 `http://<ip>:8080/player/`. Add
-`11141 H 23500 pcap /home/jason/DTVkit/Streams/DvbNIP/2025-02-11_1min.pcap loop`
+`11141 H 23500 pcap <captures>/2025-02-11_1min.pcap loop`
 for a third carrier (tuner contention, SES's offline content and content
 guide), or use `11023 H 23500 pcap .../TP37_2min_231106.pcap loop` for a
 broadcast without a list. Run `tools/asan-check.sh` (about 20 minutes) after

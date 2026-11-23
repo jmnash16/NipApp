@@ -8,6 +8,11 @@
  * THIS CODE AND INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
  * EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES
  * OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * If you or your organisation is not a member of DTVKit then you have access
+ * to this source code outside of the terms of the licence agreement
+ * and you are expected to delete this and any associated files immediately.
+ * Further information on DTVKit, membership and terms can be found at www.dtvkit.org
  *******************************************************************************/
 /**
  * @brief   NippApp: satellite and LNB setup, and the search of each carrier in the sources file.

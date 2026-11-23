@@ -686,7 +686,7 @@ The executable is linked with an RPATH of `$ORIGIN/../lib`, which
 it.
 
 Licences: NippApp's and DVBCore's own code is under the DTVKit 1.0 licence.
-civetweb is MIT. The player's libraries keep their own licences in
+(`licence.txt`). Third-party code is listed in `THIRD_PARTY.md`. civetweb is MIT. The player's libraries keep their own licences in
 `player/vendor/`.
 
 ## 12. Extending NippApp

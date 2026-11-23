@@ -1,4 +1,20 @@
 #!/bin/bash
+###############################################################################
+# Copyright © 2026 The DTVKit Open Software Foundation Ltd (www.dtvkit.org)
+#
+# This file is part of a DTVKit Software Component
+# You are permitted to copy, modify or distribute this file subject to the terms
+# of the DTVKit 1.0 Licence which can be found in licence.txt or at www.dtvkit.org
+#
+# THIS CODE AND INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
+# EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES
+# OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.
+#
+# If you or your organisation is not a member of DTVKit then you have access
+# to this source code outside of the terms of the licence agreement
+# and you are expected to delete this and any associated files immediately.
+# Further information on DTVKit, membership and terms can be found at www.dtvkit.org
+###############################################################################
 #
 # Builds the files the web player needs into player/vendor/ (not kept in git):
 #   - dvbi-client-js, built from its checkout (DVBI_CLIENT_JS, default ../../dvbi-client-js
@@ -47,10 +63,16 @@ rm -rf "$vendor_dir"
 mkdir -p "$vendor_dir/dvbi-client-js" "$vendor_dir/dashjs" "$vendor_dir/hlsjs"
 
 cp -R "$client_dir/dist/." "$vendor_dir/dvbi-client-js/"
-cp "$client_dir/licence.txt" "$vendor_dir/dvbi-client-js/"
+# Not its source maps: they contain dvbi-client-js's full source, which the gateway would serve to
+# any browser, and DTVKit source is for DTVKit members only
+find "$vendor_dir/dvbi-client-js" -name '*.map' -delete
+find "$vendor_dir/dvbi-client-js" -name '*.js' -exec sed -i '/^\/\/# sourceMappingURL=/d' {} +
+# dvbi-client-js's own licence.txt is a placeholder: the licence text is NippApp's copy
+cp "$nippapp_dir/licence.txt" "$vendor_dir/dvbi-client-js/"
 git -C "$client_dir" log -1 --format='%h %s' > "$vendor_dir/dvbi-client-js/VERSION" 2>/dev/null || true
 
 cp "$work/dashjs/package/dist/dash.all.min.js" "$vendor_dir/dashjs/"
+cp "$work/dashjs/package/dist/dash.all.min.js.LICENSE.txt" "$vendor_dir/dashjs/"
 cp "$work/dashjs/package/LICENSE.md" "$vendor_dir/dashjs/LICENSE.md" 2>/dev/null || \
    cp "$work/dashjs/package/LICENSE" "$vendor_dir/dashjs/LICENSE"
 echo "$DASHJS_VERSION" > "$vendor_dir/dashjs/VERSION"

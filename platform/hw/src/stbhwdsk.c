@@ -15,6 +15,11 @@
  * and you are expected to delete this and any associated files immediately.
  * Further information on DTVKit, membership and terms can be found at www.dtvkit.org
  *******************************************************************************/
+/* CHANGED FILE (DTVKit licence, section 2)
+ * Copied from App on 8 October 2026 and changed for NippApp on 13 October 2026:
+ * STB_DSKInitialise finds the disks before it returns, rather than the disk monitor
+ * task finding them first.
+ */
 /**
  * @brief   Disk Functions
  * @file    stbhwdsk.c

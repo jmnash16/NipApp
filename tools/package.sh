@@ -1,10 +1,27 @@
 #!/bin/bash
+###############################################################################
+# Copyright © 2026 The DTVKit Open Software Foundation Ltd (www.dtvkit.org)
+#
+# This file is part of a DTVKit Software Component
+# You are permitted to copy, modify or distribute this file subject to the terms
+# of the DTVKit 1.0 Licence which can be found in licence.txt or at www.dtvkit.org
+#
+# THIS CODE AND INFORMATION ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
+# EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES
+# OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.
+#
+# If you or your organisation is not a member of DTVKit then you have access
+# to this source code outside of the terms of the licence agreement
+# and you are expected to delete this and any associated files immediately.
+# Further information on DTVKit, membership and terms can be found at www.dtvkit.org
+###############################################################################
 # Builds a NippApp tarball that runs on other x86-64 Linux PCs without building there:
 #
 #   nippapp-<version>/bin/nippapp     optimised build, looking in ../lib first (RPATH)
 #   nippapp-<version>/lib/            the libraries whose versions differ between distributions
 #   nippapp-<version>/player/         the web player
 #   nippapp-<version>/sources.conf    this machine's sources file, to edit on the target
+#   nippapp-<version>/licences/       DTVKit's licence and those of the third-party code included
 #   nippapp-<version>/README.txt
 #
 # Not bundled, so taken from the target:
@@ -15,10 +32,13 @@
 #   - libz, liblzma, libstdc++, libgcc_s: present on every system, and backwards compatible, while
 #     the system's own libraries may need the newer ones.
 #
+# The tarball is a Linux PC build of DTVKit Software. Section 6 of licence.txt limits such builds and
+# their distribution: don't pass it on without DTVKit's agreement.
+#
 # Usage: tools/package.sh [make variables, e.g. MDNS=0]
 # The tarball is written to build/. DVBCore must have been built (see DESIGN.md).
 
-set -e
+set -e -o pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BUILD="$ROOT/build/package"
@@ -38,6 +58,11 @@ mkdir -p "$STAGE/bin" "$STAGE/lib"
 cp "$BUILD/obj-build/nippapp" "$STAGE/bin/"
 strip "$STAGE/bin/nippapp"
 cp -r "$ROOT/player" "$STAGE/player"
+find "$STAGE/player" -name '*.map' -delete
+mkdir -p "$STAGE/licences"
+cp "$ROOT/licence.txt" "$STAGE/"
+cp "$ROOT/THIRD_PARTY.md" "$STAGE/licences/"
+cp "$ROOT/third_party/civetweb/LICENSE.md" "$STAGE/licences/civetweb.md"
 cp "$ROOT/sources.conf" "$STAGE/sources.conf"
 
 # Every library the executable loads, directly or through another library, unless it is left to
@@ -47,6 +72,13 @@ ldd "$STAGE/bin/nippapp" | while read -r soname arrow path rest; do
    base=${soname%%.so*}
    if [[ ! $base =~ $SYSTEM_LIBS ]]; then
       cp -L "$path" "$STAGE/lib/$soname"
+      # its licence, from the distribution package it belongs to
+      package=$(dpkg -S "$(realpath "$path")" 2>/dev/null | head -1 | cut -d: -f1 || true)
+      if [ -z "$package" ] || [ ! -f "/usr/share/doc/$package/copyright" ]; then
+         echo "No licence found for $soname ($path)" >&2
+         exit 1
+      fi
+      cp -L "/usr/share/doc/$package/copyright" "$STAGE/licences/$package.txt"
       echo "  bundled $soname"
    fi
 done
@@ -78,7 +110,9 @@ received files in the directory it is started in, or the one given with -d.
 The player is in player/; bin/nippapp finds it there, or give another with -P.
 The libraries in lib/ are found through the executable's RPATH (\$ORIGIN/../lib); they are
 copies of this machine's, under their own licences (libxml2: MIT, ICU: Unicode, SQLite: public
-domain, libjpeg-turbo: BSD-style/IJG, libpng: libpng).
+domain, libjpeg-turbo: BSD-style/IJG, libpng: libpng), which are in licences/.
+
+NippApp is DTVKit Software, for DTVKit members only: see licence.txt.
 EOF
 
 tar -C "$BUILD" -czf "$TARBALL" "$NAME"
